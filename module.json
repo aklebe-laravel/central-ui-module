@@ -1,0 +1,18 @@
+{
+    "name": "CentralUi",
+    "alias": "central-ui",
+    "description": "Watch and manage proxmox server and their vms",
+    "keywords": [
+        "proxmox", "server", "desktop", "observer"
+    ],
+    "priority": 5000,
+    "providers": [
+        "Modules\\CentralUi\\app\\Providers\\CentralUiServiceProvider"
+    ],
+    "migration": {
+        "seeds": [
+            "Modules\\CentralUi\\database\\seeders\\DatabaseSeeder"
+        ]
+    },
+    "files": []
+}
