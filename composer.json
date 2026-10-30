@@ -1,7 +1,7 @@
 {
     "name": "aklebe-laravel/central-ui-module",
     "type": "laravel-module",
-    "description": "",
+    "description": "Web desktop for Proxmox: VM status and start/stop, schedules, permissions per VM group and WireGuard members on pfSense.",
     "authors": [
         {
             "name": "Andreas Klebe",

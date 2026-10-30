@@ -1,13 +1,36 @@
-## CentralUi Module
+# CentralUi Module
 
-A module for [Mercy Scaffold Application](https://github.com/aklebe-laravel/mercy-scaffold).
+A module for the [Mercy Scaffold](https://github.com/aklebe-laravel/mercy-scaffold).
 
-This module provides together with [central-ui-theme](https://github.com/aklebe-laravel/central-ui-theme) a desktop for Proxmox.
+Together with [central-ui-theme](https://github.com/aklebe-laravel/central-ui-theme) it is a web desktop for Proxmox:
+VM cards with status and start/stop (with a grace period), VM groups with permissions and time windows, and the
+WireGuard VPN members on a pfSense firewall. A ready-to-use project is
+[proxtop-web](https://github.com/aklebe-proxtop/proxtop-web).
 
 ## Installation
 
-Add the module to `requires` in the project's `setup.yaml`, see
-[Require modules and themes](https://github.com/aklebe-laravel/deploy-env-module#require-modules-and-themes).
+Add the module and its theme to `requires` of the project config and make the theme active:
+
+```yaml
+# project/config/setup.yaml
+kernel:
+  theme: "central-ui"
+requires:
+  - vendor: "aklebe-laravel"
+    type: "module"
+    version: "^2.0"           # or branch: "master" with branch_prefix: "dev-"
+    dev_mode: true
+    repository: 'git@github.com:${{module_vendor_name}}/${{module_snake_name_git}}.git'
+    names: [ "central-ui-module" ]
+  - vendor: "aklebe-laravel"
+    type: "theme"
+    version: "^2.0"
+    dev_mode: true
+    repository: 'git@github.com:${{module_vendor_name}}/${{module_snake_name_git}}.git'
+    names: [ "central-ui-theme" ]
+```
+
+See [Require modules and themes](https://github.com/aklebe-laravel/deploy-env-module#require-modules-and-themes).
 
 ## Environment
 
