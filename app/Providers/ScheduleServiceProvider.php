@@ -9,6 +9,7 @@ use Modules\CentralUi\app\Jobs\RefreshProxmoxDataJob;
 use Modules\CentralUi\app\Jobs\ShutdownVmJob;
 use Modules\CentralUi\app\Jobs\StartVmJob;
 use Modules\CentralUi\app\Models\ProxtopServerAction;
+use Modules\CentralUi\app\Services\SafeBroadcast;
 use Modules\SystemBase\app\Providers\Base\ScheduleBaseServiceProvider;
 
 class ScheduleServiceProvider extends ScheduleBaseServiceProvider
@@ -67,7 +68,8 @@ class ScheduleServiceProvider extends ScheduleBaseServiceProvider
             // 4. Due database actions (start / shutdown / expiring pending locks).
             // Start/Shutdown jobs are idempotent: they claim the action atomically
             // (see VmActionGuard), so dispatching one twice is harmless.
-            $actions = ProxtopServerAction::where('scheduled_at', '<=', now())->get();
+            $actions = ProxtopServerAction::where('scheduled_at', '<=', now())
+                ->get();
             foreach ($actions as $action) {
                 switch ($action->action) {
                     case ProxtopServerAction::ActionStart:
@@ -92,7 +94,7 @@ class ScheduleServiceProvider extends ScheduleBaseServiceProvider
                 if ($currentTime - ($lastRuns['desktop'] ?? 0) >= $intervals['desktop']) {
                     $lastRuns['desktop'] = $currentTime;
 
-                    broadcast(new LocalDesktopUpdated());
+                    SafeBroadcast::send(new LocalDesktopUpdated());
                 }
             }
         })

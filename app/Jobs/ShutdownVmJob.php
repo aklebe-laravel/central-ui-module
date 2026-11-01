@@ -14,6 +14,7 @@ use Modules\CentralUi\app\Events\LocalDesktopUpdated;
 use Modules\CentralUi\app\Models\ProxtopServerAction;
 use Modules\CentralUi\app\Models\ProxtopServerVm;
 use Modules\CentralUi\app\Services\ProxmoxService;
+use Modules\CentralUi\app\Services\SafeBroadcast;
 use Modules\CentralUi\app\Services\VmActionGuard;
 use Throwable;
 
@@ -68,12 +69,10 @@ class ShutdownVmJob implements ShouldQueue, ShouldBeUnique
                 return false;
             }
 
-            ProxtopServerAction::createAction(
-                $this->vmId,
+            ProxtopServerAction::createAction($this->vmId,
                 ProxtopServerAction::ActionPendingToShutdown,
                 1,
-                now()->addSeconds(self::PENDING_LOCK_SECONDS)
-            );
+                now()->addSeconds(self::PENDING_LOCK_SECONDS));
 
             return true;
         });
@@ -83,10 +82,12 @@ class ShutdownVmJob implements ShouldQueue, ShouldBeUnique
         }
 
         // Step 2: tell all frontends "busy" right away, before the (slower) API call.
-        broadcast(new LocalDesktopUpdated());
+        SafeBroadcast::send(new LocalDesktopUpdated());
 
         // Step 3: the actual Proxmox API call.
-        if ($vm = ProxtopServerVm::with([])->find($this->vmId)) {
+        if ($vm = ProxtopServerVm::with([])
+            ->find($this->vmId)
+        ) {
             app(ProxmoxService::class)->sendShutdownVm($vm);
         }
     }
@@ -98,6 +99,6 @@ class ShutdownVmJob implements ShouldQueue, ShouldBeUnique
     public function failed(Throwable $exception): void
     {
         ProxtopServerAction::removeAction($this->vmId, ProxtopServerAction::ActionPendingToShutdown);
-        broadcast(new LocalDesktopUpdated());
+        SafeBroadcast::send(new LocalDesktopUpdated());
     }
 }

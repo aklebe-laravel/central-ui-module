@@ -9,7 +9,6 @@ use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Modules\CentralUi\app\Models\ProxtopPropertyTemplate;
 use Modules\CentralUi\app\Models\ProxtopServer;
 use Modules\CentralUi\app\Models\ProxtopServerAction;
 use Modules\CentralUi\app\Models\ProxtopServerVm;
@@ -635,9 +634,7 @@ class ProxmoxService extends BaseService
             }
         }
 
-        // here - phase 2 after every vm was updated and calculated:
-        // Check every vm has template with options->allow_max_launched_vms ...
-        $this->phase2Calculations();
+        // 'options.allow_max_launched_vms' is checked live when rendering and starting, see getMaxLaunchedReasons()
 
         // set resources cache for all servers
         $this->setCache('resources', $resourcesTotalPayload);
@@ -646,40 +643,58 @@ class ProxmoxService extends BaseService
     }
 
     /**
+     * Reasons why a VM must not be started because of 'options.allow_max_launched_vms' of its enabled templates.
      *
-     * @return void
+     * A VM of the template counts as soon as its start was requested (actions 'start' and 'pending_to_start'),
+     * not only when Proxmox reports it running. So the other VMs of the group are blocked right after the click.
+     * Read-only, checked on every render of a stopped VM and again when starting (see VmStatus::requestStart()).
+     *
+     * @param  ProxtopServerVm  $vm
+     *
+     * @return array<int, string>  empty = start allowed
      */
-    private function phase2Calculations(): void
+    public function getMaxLaunchedReasons(ProxtopServerVm $vm): array
     {
+        $reasons = [];
         foreach (
-            ProxtopPropertyTemplate::with(['vms'])
+            $vm->enabledPropertyTemplates()
+                ->with('vms')
                 ->get() as $propertyTemplate
         ) {
-            if (($maxLaunch = (int) data_get($propertyTemplate, 'options.allow_max_launched_vms', -1)) >= 0) {
+            $maxLaunch = (int) data_get($propertyTemplate, 'options.allow_max_launched_vms', -1);
+            if ($maxLaunch < 0) {
+                continue;
+            }
 
-                $vmRunningCount = 0;
-                $vmNamesRunning = [];
-                /** @var ProxtopServerVm $vm */
-                foreach ($propertyTemplate->vms as $vm) {
-                    $preparedVm = $this->getCachedVmProperty($vm, null, []);
-                    if ($preparedVm['status'] == ProxtopServerVm::StatusRunning) {
-                        $vmRunningCount++;
-                        $vmNamesRunning[] = $preparedVm['name'];
-                    }
-                }
+            // VMs of this template being started right now (start requested or start lock until "running")
+            $startingVmIds = ProxtopServerAction::query()
+                ->whereIn('vm_id', $propertyTemplate->vms->modelKeys())
+                ->whereIn('action', [ProxtopServerAction::ActionStart, ProxtopServerAction::ActionPendingToStart])
+                ->pluck('vm_id')
+                ->all();
 
-                if ($vmRunningCount >= $maxLaunch) {
-                    //Log::debug("Max count reached: {$vmRunningCount}/{$maxLaunch}");
-                    foreach ($propertyTemplate->vms as $vm) {
-                        $c = $this->getCachedVmProperty($vm, 'disallow.start_reasons', []);
-                        $c[] = sprintf("Unable to start more than %s vms of '%s'. Running: %s.", $maxLaunch, $propertyTemplate->name, implode(', ', $vmNamesRunning));
-                        $this->setCachedVmProperty($vm, 'disallow.start_reasons', $c);
-                    }
+            $activeVmNames = [];
+            /** @var ProxtopServerVm $templateVm */
+            foreach ($propertyTemplate->vms as $templateVm) {
+                $preparedVm = $this->getCachedVmProperty($templateVm, null, []);
+                if ((($preparedVm['status'] ?? null) === ProxtopServerVm::StatusRunning)
+                    || in_array($templateVm->getKey(), $startingVmIds)
+                ) {
+                    $activeVmNames[] = $preparedVm['name'] ?? $templateVm->getDisplayName();
                 }
             }
-        }
-    }
 
+            if (count($activeVmNames) >= $maxLaunch) {
+                $reasons[] = __('Unable to start more than :max VMs of ":template". Running or starting: :vms.', [
+                    'max'      => $maxLaunch,
+                    'template' => $propertyTemplate->name,
+                    'vms'      => implode(', ', $activeVmNames),
+                ]);
+            }
+        }
+
+        return $reasons;
+    }
 
     /**
      * Find payload of a vm in the whole payload.

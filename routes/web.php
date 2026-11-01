@@ -1,5 +1,6 @@
 <?php
 use Illuminate\Support\Facades\Route;
+use Modules\CentralUi\app\Http\Controllers\StatusFailController;
 use Modules\WebsiteBase\app\Services\WebsiteService;
 
 /*
@@ -31,3 +32,6 @@ Route::group(['middleware' => $defaultMiddleware], function () {
         return view('content-pages.home');
     })->name('central-ui.desktop');
 });
+
+// Target of GlobalStateRedirect, so it must not use $defaultMiddleware (auth etc.)
+Route::get('/system-unavailable', [StatusFailController::class, 'index'])->name('status.fail');

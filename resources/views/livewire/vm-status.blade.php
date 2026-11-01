@@ -45,12 +45,11 @@ $showDetails = (($density ?? '') !== '');
         <div class="{{ VmStatus::listGridCss($showDetails) }} hover:bg-surface-200/50 transition-colors">
             {{-- image --}}
             <div>
-                @if($d['url'])
-                    <a href="{{ $d['url'] }}" target="_blank"> @endif
-                        <img class="h-10 w-10 rounded-lg object-cover border-[0.5px] {{ $stateBorder }} {{ $imageOpacity }} {{ $d['status_is_locked'] ? 'animate-pulse' : '' }}"
-                             src="{{ $d['image_asset_path'] }}" alt="Server Icon"/>
-                        @if($d['url']) </a>
-                @endif
+                {{-- no @if around the tags: Livewire needs balanced blocks to update the image live --}}
+                <a {{ VmStatus::imageLinkAttributes($d['url']) }}>
+                    <img class="h-10 w-10 rounded-lg object-cover bg-surface-100 border-[0.5px] {{ $stateBorder }} {{ $imageOpacity }} {{ $d['status_is_locked'] ? 'animate-pulse' : '' }}"
+                         src="{{ $d['image_asset_path'] }}" alt="Server Icon"/>
+                </a>
             </div>
 
             {{-- name --}}
@@ -110,6 +109,7 @@ $showDetails = (($density ?? '') !== '');
                 <x-central-ui::vm-switch
                         :state="$d['ui_state']"
                         :remaining="$d['grace_remaining']"
+                        :total="$d['grace_total']"
                         :canSwitch="$d['can_switch']"
                         :reasons="$d['switch_popup_content']"/>
             </div>
@@ -163,35 +163,32 @@ $showDetails = (($density ?? '') !== '');
                 ]"/>
             </div>
 
+            @php
+                // frame by status; the image keeps its aspect ratio (object-contain), the free space
+                // gets the theme color (bg-surface-100 switches in dark mode)
+                $cardImageBusy = $this->observeItemData['status_is_pending'] || $this->observeItemData['status_is_locked'];
+                $cardImageFrameCss = match (true) {
+                    $cardImageBusy => 'border-yellow-800 container-with-spinner',
+                    (bool) $this->observeItemData['status_has_stopped'] => 'opacity-40 border-red-800',
+                    (bool) $this->observeItemData['status_is_running'] => 'border-green-800',
+                    default => 'opacity-10 border-gray-800',
+                };
+            @endphp
             <div class="{{ $isIcons ? 'mx-1' : 'mx-8' }}">
-                @if($this->observeItemData['url'])
-                    <a href="{{ $this->observeItemData['url'] }}" target="_blank"> @endif
-                        @if ($this->observeItemData['status_is_pending'] || $this->observeItemData['status_is_locked'])
-                            {{--pending/locked status--}}
-                            <div class="mx-auto w-fit rounded-2xl overflow-hidden border-[0.5px] border-yellow-800 container-with-spinner">
-                                <img class="animate-pulse" src="{{ $this->observeItemData['image_asset_path'] }}" alt="Server Icon"/>
-                                <div class="loading-spinner-wrapper">
-                                    <div class="spinner"></div>
-                                </div>
-                            </div>
-                        @elseif ($this->observeItemData['status_has_stopped'])
-                            {{--stopped--}}
-                            <div class="mx-auto w-fit opacity-40 rounded-2xl overflow-hidden border-[0.5px] border-red-800">
-                                <img class="" src="{{ $this->observeItemData['image_asset_path'] }}" alt="Server Icon"/>
-                            </div>
-                        @elseif ($this->observeItemData['status_is_running'])
-                            {{--running--}}
-                            <div class="mx-auto w-fit rounded-2xl overflow-hidden border-[0.5px] border-green-800">
-                                <img class="" src="{{ $this->observeItemData['image_asset_path'] }}" alt="Server Icon"/>
-                            </div>
-                        @else
-                            {{--unknown/invalid status--}}
-                            <div class="mx-auto w-fit opacity-10 rounded-2xl overflow-hidden border-[0.5px] border-gray-800">
-                                <img class="" src="{{ $this->observeItemData['image_asset_path'] }}" alt="Server Icon"/>
+                {{-- no @if around the tags: Livewire needs balanced blocks to update the image live --}}
+                <a {{ VmStatus::imageLinkAttributes($this->observeItemData['url']) }}>
+                    {{-- the key changes with the status, so Livewire replaces the frame instead of patching it --}}
+                    <div wire:key="vm-image-{{ $this->observeItem->getKey() }}-{{ md5($cardImageFrameCss) }}"
+                         class="mx-auto aspect-square w-full rounded-2xl overflow-hidden border-[0.5px] bg-surface-100 {{ $cardImageFrameCss }}">
+                        <img @class(['h-full w-full object-contain', 'animate-pulse' => $cardImageBusy])
+                             src="{{ $this->observeItemData['image_asset_path'] }}" alt="Server Icon"/>
+                        @if ($cardImageBusy)
+                            <div class="loading-spinner-wrapper">
+                                <div class="spinner"></div>
                             </div>
                         @endif
-                        @if($this->observeItemData['url']) </a>
-                @endif
+                    </div>
+                </a>
             </div>
 
             <div class="mt-2 collapse-transition {{ $this->observeItemData['status_is_running'] ?: 'opacity-25' }}">
@@ -603,6 +600,7 @@ $showDetails = (($density ?? '') !== '');
                 <x-central-ui::vm-switch
                         :state="$this->observeItemData['ui_state']"
                         :remaining="$this->observeItemData['grace_remaining']"
+                        :total="$this->observeItemData['grace_total']"
                         :canSwitch="$this->observeItemData['can_switch']"
                         :reasons="$this->observeItemData['switch_popup_content']"/>
             </div>

@@ -14,6 +14,7 @@ use Modules\CentralUi\app\Events\LocalDesktopUpdated;
 use Modules\CentralUi\app\Models\ProxtopServerAction;
 use Modules\CentralUi\app\Models\ProxtopServerVm;
 use Modules\CentralUi\app\Services\ProxmoxService;
+use Modules\CentralUi\app\Services\SafeBroadcast;
 use Modules\CentralUi\app\Services\VmActionGuard;
 use Throwable;
 
@@ -61,12 +62,10 @@ class StartVmJob implements ShouldQueue, ShouldBeUnique
                 return false;
             }
 
-            ProxtopServerAction::createAction(
-                $this->vmId,
+            ProxtopServerAction::createAction($this->vmId,
                 ProxtopServerAction::ActionPendingToStart,
                 1,
-                now()->addSeconds(self::PENDING_LOCK_SECONDS)
-            );
+                now()->addSeconds(self::PENDING_LOCK_SECONDS));
 
             return true;
         });
@@ -76,9 +75,11 @@ class StartVmJob implements ShouldQueue, ShouldBeUnique
         }
 
         // Tell all frontends "busy" right away, before the (slower) API call.
-        broadcast(new LocalDesktopUpdated());
+        SafeBroadcast::send(new LocalDesktopUpdated());
 
-        if ($vm = ProxtopServerVm::with([])->find($this->vmId)) {
+        if ($vm = ProxtopServerVm::with([])
+            ->find($this->vmId)
+        ) {
             app(ProxmoxService::class)->sendStartVm($vm);
         }
     }
@@ -89,6 +90,6 @@ class StartVmJob implements ShouldQueue, ShouldBeUnique
     public function failed(Throwable $exception): void
     {
         ProxtopServerAction::removeAction($this->vmId, ProxtopServerAction::ActionPendingToStart);
-        broadcast(new LocalDesktopUpdated());
+        SafeBroadcast::send(new LocalDesktopUpdated());
     }
 }

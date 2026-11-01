@@ -8,6 +8,8 @@ use Exception;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Contracts\View\Factory;
 use Illuminate\Contracts\View\View;
+use Illuminate\Support\Facades\DB;
+use Illuminate\View\ComponentAttributeBag;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\On;
 use Livewire\Attributes\Reactive;
@@ -17,6 +19,7 @@ use Modules\CentralUi\app\Models\ProxtopObserveServerItem;
 use Modules\CentralUi\app\Models\ProxtopServerAction;
 use Modules\CentralUi\app\Models\ProxtopServerVm;
 use Modules\CentralUi\app\Services\ProxmoxService;
+use Modules\CentralUi\app\Services\SafeBroadcast;
 use Modules\CentralUi\app\Services\VmActionGuard;
 use Modules\SystemBase\app\Http\Livewire\BaseComponent;
 use Modules\WebsiteBase\app\Services\Setting;
@@ -117,6 +120,20 @@ class VmStatus extends BaseComponent
      * @var Setting
      */
     protected Setting $system;
+
+    /**
+     * Attributes of the link around the VM image: href and target only if the VM has an url.
+     * The <a> is always rendered, so the view needs no @if around its tags
+     * (an @if around an opening tag only leaves unbalanced Livewire block markers and breaks live updates).
+     *
+     * @param  string|null  $url
+     *
+     * @return ComponentAttributeBag
+     */
+    public static function imageLinkAttributes(?string $url): ComponentAttributeBag
+    {
+        return new ComponentAttributeBag($url ? ['href' => $url, 'target' => '_blank'] : []);
+    }
 
     /**
      * Column template of the desktop list layout.
@@ -224,10 +241,12 @@ class VmStatus extends BaseComponent
     /**
      * Any event here re-renders the card, so a state change made by another
      * user, a queue job or the scheduler shows up without a page reload.
+     * 'vm-desktop:poll' is the fallback of the desktop while the websocket is disconnected (see vm-desktop.blade.php).
      *
      * @return void
      */
     #[On('echo:vm-updates,.Modules\CentralUi\app\Events\LocalDesktopUpdated')]
+    #[On('vm-desktop:poll')]
     public function receiveDesktopUpdates(): void
     {
         $this->lastDesktopUpdate = time();
@@ -253,11 +272,25 @@ class VmStatus extends BaseComponent
             return;
         }
 
-        // Due immediately: the scheduler dispatches StartVmJob on its next tick.
-        ProxtopServerAction::createActionIfNotExists($this->observeItem->vm_id,
-            ProxtopServerAction::ActionStart,
-            1,
-            now());
+        $vm = $this->observeItem->vm;
+        DB::transaction(function () use ($vm): void {
+            // Lock the templates of this VM: a second click on another VM of the same group
+            // ('options.allow_max_launched_vms') waits here and then sees this start action.
+            $vm->propertyTemplates()
+                ->lockForUpdate()
+                ->get();
+
+            if ($this->proxmox->getMaxLaunchedReasons($vm)) {
+                // limit reached in the meantime: the re-render shows the reason
+                return;
+            }
+
+            // Due immediately: the scheduler dispatches StartVmJob on its next tick.
+            ProxtopServerAction::createActionIfNotExists($vm->getKey(),
+                ProxtopServerAction::ActionStart,
+                1,
+                now());
+        });
 
         $this->afterAction();
     }
@@ -341,7 +374,7 @@ class VmStatus extends BaseComponent
 
         // Other browsers/users see the new state (e.g. the grace countdown) immediately,
         // not only with the next periodic resource event.
-        broadcast(new LocalDesktopUpdated());
+        SafeBroadcast::send(new LocalDesktopUpdated());
     }
 
     // ------------------------------------------------------------------
@@ -480,9 +513,18 @@ class VmStatus extends BaseComponent
             $d['disallow']['stop_reasons'][] = __('Permission denied');
         }
 
+        // start limit of the VM groups, live (counts VMs being started too), only needed while stopped
+        if ($state === VmUiState::Stopped) {
+            foreach ($this->proxmox->getMaxLaunchedReasons($this->observeItem->vm) as $reason) {
+                $d['disallow']['start_reasons'][] = $reason;
+            }
+        }
+
         $d['ui_state'] = $state;
         // ceil: any running grace period shows at least 1 second
         $d['grace_remaining'] = (int) ceil($graceRemaining ?? 0);
+        // full length of the grace period, so the countdown bar keeps its scale when the card re-renders
+        $d['grace_total'] = self::GRACE_SECONDS;
 
         // Legacy flags, kept so the rest of the blade works unchanged. All derived from the state.
         $d['status_is_running'] = in_array($state, [VmUiState::Running, VmUiState::Grace], true);
@@ -539,11 +581,11 @@ class VmStatus extends BaseComponent
             default => [],
         };
 
-        $imageUrl = theme_asset('images/no_image_available.jpg'); // No image given, set default
+        $imageUrl = theme_asset('images/no_image_available.webp'); // No image given, set default
         $imageUrl = ($d['image'] ?? null) ?: $imageUrl;
 
         if ($d['status_is_pending'] || $d['status_is_locked']) {
-            $imageUrl = theme_asset('images/frank-krank.gif');
+            $imageUrl = theme_asset('images/disruption.gif');
         }
         $d['image_asset_path'] = $imageUrl;
 

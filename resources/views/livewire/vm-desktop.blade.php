@@ -11,7 +11,12 @@ $layout = $this->sanitizeLayout($globalDesktopLayout ?? VmDesktop::LAYOUT_COMPAC
 // user setting 'desktop_vm_details': '' hides the details in all layouts
 $showDetails = (($globalDesktopVmDetails ?? '') !== '');
 ?>
-<div>
+{{-- liveUpdateFallback (centralUi.js): polls the cards only while the websocket is disconnected --}}
+<div x-data="liveUpdateFallback({{ VmDesktop::LIVE_UPDATE_FALLBACK_SECONDS }})">
+    <div x-show="isBroken" x-cloak class="alert alert-warning mx-2 mb-2">
+        {{ __('Live updates are disconnected. The VMs are refreshed every :seconds seconds.', ['seconds' => VmDesktop::LIVE_UPDATE_FALLBACK_SECONDS]) }}
+    </div>
+
     @if ($observeItemIds ?? null)
 
         @if ($layout === VmDesktop::LAYOUT_LIST)

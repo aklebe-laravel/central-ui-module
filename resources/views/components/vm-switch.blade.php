@@ -8,6 +8,7 @@
         <x-central-ui::vm-switch
             :state="$this->observeItemData['ui_state']"
             :remaining="$this->observeItemData['grace_remaining']"
+            :total="$this->observeItemData['grace_total']"
             :canSwitch="$this->observeItemData['can_switch']"
             :reasons="$this->observeItemData['switch_popup_content']"/>
 --}}
@@ -15,6 +16,7 @@
 @props([
     'state',                 // VmUiState
     'remaining' => 0,        // seconds left in the grace period (only used in state "grace")
+    'total'     => null,     // full length of the grace period (scale of the bar), null = remaining
     'canSwitch' => true,     // same value the server checks in the actions
     'reasons'   => [],       // why switching is not possible (shown in the popup)
 ])
@@ -51,7 +53,7 @@
 >
     {{-- Grace period overlay: pure display, the server decides everything --}}
     @if($state === VmUiState::Grace)
-        <div x-data="graceCountdown(@js($remaining))"
+        <div x-data="graceCountdown(@js($remaining), @js($total))"
              class="absolute inset-0 z-10 flex flex-col justify-end bg-surface/30 backdrop-blur-[1px] pointer-events-none">
             <div class="flex-grow flex items-center justify-center text-2xl font-bold text-info-700" x-text="Math.ceil(left)"></div>
             <div class="w-full h-1.5 bg-info-200/50">

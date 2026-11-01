@@ -94,9 +94,11 @@ export class CentralUi {
 
 
         const register = () => {
-            window.Alpine.data('graceCountdown', (remaining) => ({
+            // total: full length of the grace period. A re-render starts the countdown again with the
+            // remaining seconds, but the bar keeps its scale instead of jumping back to 100 %.
+            window.Alpine.data('graceCountdown', (remaining, total = null) => ({
                 left: remaining,
-                total: remaining,
+                total: total || remaining,
                 timer: null,
 
                 init() {
@@ -122,6 +124,83 @@ export class CentralUi {
                 destroy() {
                     if (this.timer) {
                         clearInterval(this.timer);
+                    }
+                },
+            }));
+
+            /**
+             * Fallback of the VM desktop while the websocket (Reverb) is not connected:
+             * every intervalSeconds all cards refresh by the Livewire event 'vm-desktop:poll'.
+             * Connected = no timer, no requests (the cards get pushed events).
+             */
+            window.Alpine.data('liveUpdateFallback', (intervalSeconds = 20) => ({
+                // pusher connection state: initialized, connecting, connected, unavailable, failed, disconnected
+                // ('missing' = no Echo on this page)
+                state: 'initialized',
+                timer: null,
+                missedUpdates: false,
+                connection: null,
+                onStateChange: null,
+
+                // really broken, not just connecting (used for the hint)
+                get isBroken() {
+                    return ['unavailable', 'failed', 'disconnected', 'missing'].includes(this.state);
+                },
+
+                init() {
+                    this.connection = window.Echo?.connector?.pusher?.connection ?? null;
+                    if (!this.connection) {
+                        this.setState('missing');
+                        return;
+                    }
+
+                    this.onStateChange = (states) => this.setState(states.current);
+                    this.connection.bind('state_change', this.onStateChange);
+                    this.setState(this.connection.state);
+                },
+
+                setState(state) {
+                    this.state = state;
+                    if (state === 'connected') {
+                        this.stopPolling();
+                        // reconnected after a gap: catch up once
+                        if (this.missedUpdates) {
+                            this.missedUpdates = false;
+                            this.refresh();
+                        }
+                    } else {
+                        this.startPolling();
+                    }
+                },
+
+                startPolling() {
+                    if (this.timer) {
+                        return;
+                    }
+                    this.timer = setInterval(() => {
+                        this.missedUpdates = true;
+                        this.refresh();
+                    }, intervalSeconds * 1000);
+                },
+
+                stopPolling() {
+                    if (this.timer) {
+                        clearInterval(this.timer);
+                        this.timer = null;
+                    }
+                },
+
+                refresh() {
+                    // no requests from background tabs
+                    if (!document.hidden) {
+                        window.Livewire.dispatch('vm-desktop:poll');
+                    }
+                },
+
+                destroy() {
+                    this.stopPolling();
+                    if (this.connection && this.onStateChange) {
+                        this.connection.unbind('state_change', this.onStateChange);
                     }
                 },
             }));

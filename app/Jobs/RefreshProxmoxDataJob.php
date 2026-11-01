@@ -14,6 +14,7 @@ use Illuminate\Queue\SerializesModels;
 use Modules\CentralUi\app\Events\ProxmoxApiResourceDataUpdated;
 use Modules\CentralUi\app\Events\ProxmoxApiRrdDataUpdated;
 use Modules\CentralUi\app\Services\ProxmoxService;
+use Modules\CentralUi\app\Services\SafeBroadcast;
 
 /**
  * Fetches data from the Proxmox API and rebuilds the payload cache.
@@ -67,8 +68,7 @@ class RefreshProxmoxDataJob implements ShouldQueue, ShouldBeUnique
     public function middleware(): array
     {
         return [
-            (new WithoutOverlapping('proxmox-data-refresh'))
-                ->releaseAfter(5)
+            (new WithoutOverlapping('proxmox-data-refresh'))->releaseAfter(5)
                 ->expireAfter(180),
         ];
     }
@@ -87,14 +87,14 @@ class RefreshProxmoxDataJob implements ShouldQueue, ShouldBeUnique
 
         if ($this->part === self::PartResources) {
             $proxmox->receiveResourcesAndBroadcast();
-            broadcast(new ProxmoxApiResourceDataUpdated());
+            SafeBroadcast::send(new ProxmoxApiResourceDataUpdated());
 
             return;
         }
 
         if ($this->part === self::PartRrd) {
             $proxmox->receiveRrdData('day');
-            broadcast(new ProxmoxApiRrdDataUpdated());
+            SafeBroadcast::send(new ProxmoxApiRrdDataUpdated());
         }
     }
 }

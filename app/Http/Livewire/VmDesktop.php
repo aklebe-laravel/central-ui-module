@@ -23,6 +23,12 @@ class VmDesktop extends BaseComponent
     public const string LAYOUT_ICONS = 'icons';
     public const string LAYOUT_LIST = 'list';
 
+    /**
+     * While the websocket (Reverb) is disconnected, the desktop asks all cards to refresh this often.
+     * Connected: no polling at all, the cards get pushed events.
+     */
+    public const int LIVE_UPDATE_FALLBACK_SECONDS = 20;
+
     public const array LAYOUTS = [
         self::LAYOUT_COMPACT,
         self::LAYOUT_ICONS,
