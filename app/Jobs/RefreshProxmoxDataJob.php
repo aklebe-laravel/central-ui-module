@@ -25,7 +25,8 @@ use Modules\CentralUi\app\Services\SafeBroadcast;
  *
  * Two kinds of work, one class, so they can be serialized (see middleware()):
  *   - PartResources: cluster resources + payload rebuild (ProxmoxService::receiveResourcesAndBroadcast)
- *   - PartRrd:       RRD history per running VM          (ProxmoxService::receiveRrdData)
+ *   - PartRrd:       RRD statistics per running VM for one timeframe (ProxmoxService::receiveRrdData),
+ *                    one job per key of ProxmoxService::RrdTimeframes
  */
 class RefreshProxmoxDataJob implements ShouldQueue, ShouldBeUnique
 {
@@ -45,25 +46,29 @@ class RefreshProxmoxDataJob implements ShouldQueue, ShouldBeUnique
      */
     public int $uniqueFor = 120;
 
-    public function __construct(protected string $part)
+    /**
+     * @param  string  $part       self::PartResources or self::PartRrd
+     * @param  string  $timeframe  PartRrd only: key of ProxmoxService::RrdTimeframes
+     */
+    public function __construct(protected string $part, protected string $timeframe = 'hour')
     {
         // Optional: own queue/worker. Falls back to 'default' when the config key does not exist.
         $this->onQueue((string) config('central-ui.queues.proxmox_refresh', 'default'));
     }
 
     /**
-     * One unique lock per part (resources / rrd).
+     * One unique lock per part (resources, rrd-hour, rrd-day, ...).
      */
     public function uniqueId(): string
     {
-        return $this->part;
+        return ($this->part === self::PartRrd) ? $this->part.'-'.$this->timeframe : $this->part;
     }
 
     /**
-     * Resources and RRD work must never run at the same time.
-     * Both write into the same cache structure (CacheKeyProxmoxServerApi); with the
-     * old scheduler closure they ran one after another, and this keeps it that way
-     * even with several queue workers. The second job is released and retried.
+     * Resources and RRD work never run at the same time.
+     * Originally both wrote into one shared cache array. Since every VM has its own
+     * cache keys (see ProxmoxService::CachePrefix) this is no longer required, but it
+     * keeps the load on the Proxmox API low. The second job is released and retried.
      */
     public function middleware(): array
     {
@@ -93,7 +98,7 @@ class RefreshProxmoxDataJob implements ShouldQueue, ShouldBeUnique
         }
 
         if ($this->part === self::PartRrd) {
-            $proxmox->receiveRrdData('day');
+            $proxmox->receiveRrdData($this->timeframe);
             SafeBroadcast::send(new ProxmoxApiRrdDataUpdated());
         }
     }

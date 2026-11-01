@@ -73,35 +73,9 @@ class VmDesktop extends BaseComponent
     }
 
     /**
-     * @var array
-     */
-    protected array $wholePayload = [];
-
-    /**
      * @var string
      */
     public string $statusMessage = '';
-
-    /**
-     * Last update for api rrd data
-     *
-     * @var int
-     */
-    public int $lastRrdUpdate = 0;
-
-    /**
-     * Last update for api resources
-     *
-     * @var int
-     */
-    public int $lastServerUpdate = 0;
-
-    /**
-     * Last update for desktop trigger
-     *
-     * @var int
-     */
-    public int $lastDesktopUpdate = 0;
 
     /**
      * @var ?Collection|null
@@ -190,38 +164,20 @@ class VmDesktop extends BaseComponent
     }
 
     /**
-     * Echo-Event syntax: "echo:{channel},{event}"
+     * Re-renders the desktop after the user changed the desktop settings (UserDesktopSettings).
+     *
+     * The desktop itself does NOT listen to the Echo events: every request runs init()
+     * (list of visible items with templates), and the cards (VmStatus) listen themselves.
      *
      * @return void
      */
-    #[On('echo:proxmox-rrd-updates,.Modules\CentralUi\app\Events\ProxmoxApiRrdDataUpdated')]
-    public function receiveApiRrdUpdates(): void
-    {
-        //$this->lastRrdUpdate = time();
-    }
-
-    /**
-     * @return void
-     */
-    #[On('echo:proxmox-resource-updates,.Modules\CentralUi\app\Events\ProxmoxApiResourceDataUpdated')]
-    public function receiveApiResourcesUpdates(): void
-    {
-        //$this->lastServerUpdate = time();
-    }
-
-    /**
-     * @return void
-     */
-    #[On('echo:vm-updates,.Modules\CentralUi\app\Events\LocalDesktopUpdated')]
     #[On('vm-desktop:refresh')]
     public function receiveDesktopUpdates(): void
     {
-        //$this->lastDesktopUpdate = time();
     }
 
     /**
-     * Runs once, immediately after the component is instantiated, but before render() is called.
-     * This is only called once on initial page load and never called again, even on component refreshes
+     * Runs on mount AND on every hydrate (see BaseComponent), so on every request of this component.
      *
      * @return void
      */
@@ -231,7 +187,6 @@ class VmDesktop extends BaseComponent
 
         $this->proxmox = app(ProxmoxService::class);
         $this->system = app(Setting::class);
-        $this->wholePayload = $this->proxmox->getCache('resources', []);
         $this->observeItemIds = $this->getObserveItemIds();
     }
 

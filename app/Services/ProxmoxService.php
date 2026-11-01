@@ -4,16 +4,15 @@ declare(strict_types = 1);
 namespace Modules\CentralUi\app\Services;
 
 use Exception;
-use Illuminate\Foundation\Application;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Modules\CentralUi\app\Models\ProxtopServer;
 use Modules\CentralUi\app\Models\ProxtopServerAction;
 use Modules\CentralUi\app\Models\ProxtopServerVm;
 use Modules\SystemBase\app\Services\Base\BaseService;
-use Modules\SystemBase\app\Services\CacheService;
 
 class ProxmoxService extends BaseService
 {
@@ -28,14 +27,59 @@ class ProxmoxService extends BaseService
     const string AuthHeaderApiTokenName = 'PVEAPIToken';
 
     /**
-     * @var string
+     * Prefix of all cache keys of this service.
+     *
+     * Every piece of data has its own key (see buildCacheKey()):
+     *   central-ui.proxmox.server.<serverId>.vms           raw 'cluster/resources' of a server
+     *   central-ui.proxmox.vm.<vmId>.rrd_stats.<timeframe> statistics of the RRD history of a VM (RrdStats)
+     *   central-ui.proxmox.vm.<vmId>.prepared              prepared payload of a VM (read by the desktop cards)
+     *   central-ui.proxmox.resources                       list of all prepared payloads (console commands)
+     *
+     * The raw RRD history (~450 KB per VM and day) is never cached, only its statistics (< 1 KB).
+     * Overview for humans: README, section "Caching and statistics".
      */
-    protected string $cacheKey = 'proxtop_api_cache';
+    const string CachePrefix = 'central-ui.proxmox';
 
     /**
+     * Old cache keys. Deleted by forgetLegacyCache().
+     *   proxmox_server_api, proxtop_api_cache: one array for everything (several MB)
      *
+     * @todo remove when every instance ran the resource job once with this version
      */
-    const string CacheKeyProxmoxServerApi = 'proxmox_server_api';
+    const array LegacyCacheKeys = ['proxmox_server_api', 'proxtop_api_cache'];
+
+    /**
+     * RRD timeframes fetched from Proxmox ('rrddata?timeframe=...') and how often.
+     *   config:   core config path (module central-ui) of the interval in seconds
+     *   interval: default if the config is missing
+     *
+     * Large timeframes are expensive (day: ~450 KB per VM) and change slowly, so they are fetched rarely.
+     * The scheduler dispatches one RefreshProxmoxDataJob per timeframe (see ScheduleServiceProvider).
+     */
+    const array RrdTimeframes = [
+        'hour' => ['config' => 'scheduler.api.rrd.interval', 'interval' => 60],
+        'day'  => ['config' => 'scheduler.api.rrd_day.interval', 'interval' => 1800],
+    ];
+
+    /**
+     * The phases of the VM statistics (payload keys like 'cpu_avg_phase1').
+     *   timeframe: which RRD timeframe the phase is calculated from (key of RrdTimeframes)
+     *   minutes:   window length back from the newest entry, null = the whole timeframe
+     *
+     * receiveRrdData() calculates every phase of the fetched timeframe, getVmRrdPhases() merges them,
+     * the prepare*Stats() methods read them.
+     */
+    const array RrdPhases = [
+        'phase1' => ['timeframe' => 'hour', 'minutes' => 10],
+        'phase2' => ['timeframe' => 'hour', 'minutes' => 60],
+        'phase3' => ['timeframe' => 'day', 'minutes' => null],
+    ];
+
+    /**
+     * Statistics are refreshed regularly while a VM is running. Without refresh (VM stopped,
+     * scheduler down) they expire after this time instead of staying in the cache forever.
+     */
+    const int RrdCacheTtlSeconds = 86400;
 
     /**
      * @var string
@@ -50,39 +94,11 @@ class ProxmoxService extends BaseService
     public float $defaultCompareTolerance = 0.1;
 
     /**
-     * Phase 1: 10 minutes
+     * True after forgetLegacyCache() ran in this process.
      *
-     * @var int
+     * @var bool
      */
-    protected int $avgPhase1InMin = 10;
-
-    /**
-     * Phase 2: 1 Hour
-     *
-     * @var int
-     */
-    protected int $avgPhase2InMin = 60;
-
-    /**
-     * Phase 3: 1 Day
-     *
-     * @var int
-     */
-    protected int $avgPhase3InMin;
-
-    /**
-     * @var CacheService|Application|mixed|object
-     */
-    protected CacheService $cacheService;
-
-    /**
-     *
-     */
-    public function __construct()
-    {
-        parent::__construct();
-        $this->cacheService = app(CacheService::class);
-    }
+    protected static bool $legacyCacheForgotten = false;
 
     /**
      * @param  ProxtopServer  $server
@@ -170,31 +186,168 @@ class ProxmoxService extends BaseService
     }
 
     /**
-     * Get cache by server id and extra path
+     * @param  string|int  ...$parts
      *
-     * @param  int         $serverId   server id
-     * @param  string      $arrayPath  path in cache like "vm.100.name"
-     * @param  mixed|null  $default    default value if cache does not exists
-     *
-     * @return mixed
+     * @return string like 'central-ui.proxmox.vm.12.prepared'
      */
-    public function getServerApiCache(int $serverId, string $arrayPath, mixed $default = null): mixed
+    public function buildCacheKey(string|int ...$parts): string
     {
-        return $this->cacheService->getCacheByPath(self::CacheKeyProxmoxServerApi, $serverId.'.'.$arrayPath, $default);
+        return implode('.', [self::CachePrefix, ...$parts]);
     }
 
     /**
-     * Set cache by server id and extra path
+     * @param  ProxtopServerVm|int  $vm  model or its id
      *
-     * @param  int     $serverId   server id
-     * @param  string  $arrayPath  path in cache like "vm.100.name"
-     * @param  mixed   $data       value(s) to set
+     * @return int
+     */
+    protected function vmKey(ProxtopServerVm|int $vm): int
+    {
+        return is_int($vm) ? $vm : (int) $vm->getKey();
+    }
+
+    /**
+     * Raw 'cluster/resources' data of a server (received by receiveResources()).
+     *
+     * @param  int  $serverId
+     *
+     * @return array
+     */
+    public function getServerVms(int $serverId): array
+    {
+        return Cache::get($this->buildCacheKey('server', $serverId, 'vms')) ?? [];
+    }
+
+    /**
+     * @param  int    $serverId
+     * @param  array  $vms
      *
      * @return void
      */
-    public function setServerApiCache(int $serverId, string $arrayPath, mixed $data): void
+    public function setServerVms(int $serverId, array $vms): void
     {
-        $this->cacheService->setCacheByPath(self::CacheKeyProxmoxServerApi, $serverId.'.'.$arrayPath, $data);
+        Cache::forever($this->buildCacheKey('server', $serverId, 'vms'), $vms);
+    }
+
+    /**
+     * @param  ProxtopServerVm|int  $vm
+     * @param  string               $timeframe
+     *
+     * @return string
+     */
+    protected function getCacheKeyForRrdStats(ProxtopServerVm|int $vm, string $timeframe): string
+    {
+        return $this->buildCacheKey('vm', $this->vmKey($vm), 'rrd_stats', $timeframe);
+    }
+
+    /**
+     * Statistics of one RRD timeframe of a VM (written by receiveRrdData()).
+     *
+     * @param  ProxtopServerVm|int  $vm
+     * @param  string               $timeframe  key of RrdTimeframes
+     *
+     * @return array{updated_at?: int, phases?: array<string, array>}  [] if not cached
+     */
+    public function getVmRrdStats(ProxtopServerVm|int $vm, string $timeframe): array
+    {
+        return Cache::get($this->getCacheKeyForRrdStats($vm, $timeframe)) ?? [];
+    }
+
+    /**
+     * @param  ProxtopServerVm|int  $vm
+     * @param  string               $timeframe
+     * @param  array                $stats  ['updated_at' => int, 'phases' => ['phase1' => RrdStats, ...]]
+     *
+     * @return void
+     */
+    public function setVmRrdStats(ProxtopServerVm|int $vm, string $timeframe, array $stats): void
+    {
+        Cache::put($this->getCacheKeyForRrdStats($vm, $timeframe), $stats, self::RrdCacheTtlSeconds);
+    }
+
+    /**
+     * Calculates the statistics of every phase that uses $timeframe (see RrdPhases).
+     *
+     * @param  string  $timeframe
+     * @param  array   $rrdData  raw entries of 'rrddata'
+     *
+     * @return array{updated_at: int, phases: array<string, array>}
+     */
+    public function calculateRrdStats(string $timeframe, array $rrdData): array
+    {
+        $phases = [];
+        foreach (self::RrdPhases as $phase => $definition) {
+            if ($definition['timeframe'] === $timeframe) {
+                $phases[$phase] = RrdStats::calculate($rrdData, $definition['minutes']);
+            }
+        }
+
+        return [
+            'updated_at' => time(),
+            'phases'     => $phases,
+        ];
+    }
+
+    /**
+     * All phases of a VM (one cache round trip for all timeframes).
+     * Missing phases (not fetched yet) are empty: all values 0.
+     *
+     * @param  ProxtopServerVm|int  $vm
+     *
+     * @return array<string, array>  'phase1' => RrdStats::calculate() result, ...
+     */
+    public function getVmRrdPhases(ProxtopServerVm|int $vm): array
+    {
+        $keys = [];
+        foreach (array_keys(self::RrdTimeframes) as $timeframe) {
+            $keys[] = $this->getCacheKeyForRrdStats($vm, $timeframe);
+        }
+
+        $phases = [];
+        foreach (Cache::many($keys) as $stats) {
+            $phases += $stats['phases'] ?? [];
+        }
+
+        $result = [];
+        foreach (self::RrdPhases as $phase => $definition) {
+            $result[$phase] = $phases[$phase] ?? RrdStats::empty((int) $definition['minutes']);
+        }
+
+        return $result;
+    }
+
+    /**
+     * One value of a phase.
+     *
+     * @param  array   $phases  result of getVmRrdPhases()
+     * @param  string  $phase   'phase1', ...
+     * @param  string  $metric  one of RrdStats::METRICS
+     * @param  string  $kind    'avg' or 'max'
+     *
+     * @return float
+     */
+    protected function rrdValue(array $phases, string $phase, string $metric, string $kind = 'avg'): float
+    {
+        return (float) ($phases[$phase][$kind][$metric] ?? 0.0);
+    }
+
+    /**
+     * Deletes the old cache keys (one big array for everything, several MB).
+     * Runs once per process, deleting a missing key is cheap.
+     *
+     * @return void
+     * @todo remove together with LegacyCacheKeys
+     *
+     */
+    public function forgetLegacyCache(): void
+    {
+        if (static::$legacyCacheForgotten) {
+            return;
+        }
+
+        foreach (self::LegacyCacheKeys as $key) {
+            Cache::forget($key);
+        }
+        static::$legacyCacheForgotten = true;
     }
 
     /**
@@ -289,15 +442,15 @@ class ProxmoxService extends BaseService
     /**
      * @param  array            $vmPayload
      * @param  ProxtopServerVm  $vm
-     * @param  array            $rrdDataPerDay
+     * @param  array            $phases  result of getVmRrdPhases()
      *
      * @return array
      */
-    public function prepareCpuStats(array $vmPayload, ProxtopServerVm $vm, array $rrdDataPerDay): array
+    public function prepareCpuStats(array $vmPayload, ProxtopServerVm $vm, array $phases): array
     {
-        $cpuPhase1 = round($this->getAvgRrdData($rrdDataPerDay, 'cpu', $this->avgPhase1InMin) * 100);
-        $cpuPhase2 = round($this->getAvgRrdData($rrdDataPerDay, 'cpu', $this->avgPhase2InMin) * 100);
-        $cpuPhase3 = round($this->getAvgRrdData($rrdDataPerDay, 'cpu', $this->avgPhase3InMin) * 100);
+        $cpuPhase1 = round($this->rrdValue($phases, 'phase1', 'cpu') * 100);
+        $cpuPhase2 = round($this->rrdValue($phases, 'phase2', 'cpu') * 100);
+        $cpuPhase3 = round($this->rrdValue($phases, 'phase3', 'cpu') * 100);
 
         return [
             'cpu_idle'               => $vm->getTemplatesHighestNumber('cpu_idle', 10),
@@ -314,18 +467,18 @@ class ProxmoxService extends BaseService
     /**
      * @param  array            $vmPayload
      * @param  ProxtopServerVm  $vm
-     * @param  array            $rrdDataPerDay
+     * @param  array            $phases  result of getVmRrdPhases()
      *
      * @return array
      */
-    public function prepareMemStats(array $vmPayload, ProxtopServerVm $vm, array $rrdDataPerDay): array
+    public function prepareMemStats(array $vmPayload, ProxtopServerVm $vm, array $phases): array
     {
         $memMax = $vmPayload['maxmem'] ?? 0;
         $memUsed = $vmPayload['mem'] ?? 0;
         $memUsage = ($memMax > 0) ? round((((float) $memUsed) / (float) $memMax) * 100.0) : 0;
-        $memUsedPhase1 = round($this->getAvgRrdData($rrdDataPerDay, 'mem', $this->avgPhase1InMin, 0));
-        $memUsedPhase2 = round($this->getAvgRrdData($rrdDataPerDay, 'mem', $this->avgPhase2InMin, 0));
-        $memUsedPhase3 = round($this->getAvgRrdData($rrdDataPerDay, 'mem', $this->avgPhase3InMin, 0));
+        $memUsedPhase1 = round($this->rrdValue($phases, 'phase1', 'mem'));
+        $memUsedPhase2 = round($this->rrdValue($phases, 'phase2', 'mem'));
+        $memUsedPhase3 = round($this->rrdValue($phases, 'phase3', 'mem'));
 
         return [
             'mem_free'               => $memMax - $memUsed,
@@ -342,11 +495,11 @@ class ProxmoxService extends BaseService
     /**
      * @param  array            $vmPayload
      * @param  ProxtopServerVm  $vm
-     * @param  array            $rrdDataPerDay
+     * @param  array            $phases  result of getVmRrdPhases()
      *
      * @return array
      */
-    public function prepareNetStats(array $vmPayload, ProxtopServerVm $vm, array $rrdDataPerDay): array
+    public function prepareNetStats(array $vmPayload, ProxtopServerVm $vm, array $phases): array
     {
         $netTrafficLimit = 20 * 1024 * 1204; // @todo: read max traffic of system
         $countVms = ProxtopServerVm::count();
@@ -356,19 +509,16 @@ class ProxmoxService extends BaseService
         // use vm template traffic if configured
         $netTrafficLimit = $vm->getTemplatesLowestNumber('net_traffic_limit', $netTrafficLimit);
 
-        // idle traffic
-        $netTrafficIdle = $vm->getTemplatesHighestNumber('net_traffic_idle', 1024);
-
         $netIn = $vmPayload['netin'] ?? 0.0;
-        $netInAvgPhase1 = round($this->getAvgRrdData($rrdDataPerDay, 'netin', $this->avgPhase1InMin));
-        $netInAvgPhase2 = round($this->getAvgRrdData($rrdDataPerDay, 'netin', $this->avgPhase2InMin));
-        $netInAvgPhase3 = round($this->getAvgRrdData($rrdDataPerDay, 'netin', $this->avgPhase3InMin));
-        $netInMaxPhase3 = round($this->getMaxRrdData($rrdDataPerDay, 'netin', $this->avgPhase3InMin));
+        $netInAvgPhase1 = round($this->rrdValue($phases, 'phase1', 'netin'));
+        $netInAvgPhase2 = round($this->rrdValue($phases, 'phase2', 'netin'));
+        $netInAvgPhase3 = round($this->rrdValue($phases, 'phase3', 'netin'));
+        $netInMaxPhase3 = round($this->rrdValue($phases, 'phase3', 'netin', 'max'));
         $netOut = $vmPayload['netout'] ?? 0.0;
-        $netOutAvgPhase1 = round($this->getAvgRrdData($rrdDataPerDay, 'netout', $this->avgPhase1InMin));
-        $netOutAvgPhase2 = round($this->getAvgRrdData($rrdDataPerDay, 'netout', $this->avgPhase2InMin));
-        $netOutAvgPhase3 = round($this->getAvgRrdData($rrdDataPerDay, 'netout', $this->avgPhase3InMin));
-        $netOutMaxPhase3 = round($this->getMaxRrdData($rrdDataPerDay, 'netout', $this->avgPhase3InMin));
+        $netOutAvgPhase1 = round($this->rrdValue($phases, 'phase1', 'netout'));
+        $netOutAvgPhase2 = round($this->rrdValue($phases, 'phase2', 'netout'));
+        $netOutAvgPhase3 = round($this->rrdValue($phases, 'phase3', 'netout'));
+        $netOutMaxPhase3 = round($this->rrdValue($phases, 'phase3', 'netout', 'max'));
         $netTraffic = $this->calcTraffic($netIn, $netOut);
         $netTrafficAvgPhase1 = $this->calcTraffic($netInAvgPhase1, $netOutAvgPhase1);
         $netTrafficAvgPhase2 = $this->calcTraffic($netInAvgPhase2, $netOutAvgPhase2);
@@ -378,12 +528,6 @@ class ProxmoxService extends BaseService
         if ($netTrafficLimit > $netTrafficMaxPhase3) {
             $netTrafficLimit = $netTrafficMaxPhase3;
         }
-        $netTrafficAvgPhase1Percent = $this->calcTrafficPercent($netTrafficAvgPhase1, $netTrafficLimit);
-        $netTrafficAvgPhase2Percent = $this->calcTrafficPercent($netTrafficAvgPhase2, $netTrafficLimit);
-        $netTrafficAvgPhase3Percent = $this->calcTrafficPercent($netTrafficAvgPhase3, $netTrafficLimit);
-
-        $netTrafficIdlePercent = 10;
-        $netTrafficLimitPercent = 90;
 
         return [
             'netin'                          => $netIn,
@@ -399,41 +543,39 @@ class ProxmoxService extends BaseService
             'net_traffic_avg_phase2'         => $netTrafficAvgPhase2,
             'net_traffic_avg_phase3'         => $netTrafficAvgPhase3,
             'net_traffic_max_phase3'         => $netTrafficMaxPhase3,
-            'net_traffic_avg_phase1_percent' => $netTrafficAvgPhase1Percent,
-            'net_traffic_avg_phase2_percent' => $netTrafficAvgPhase2Percent,
-            'net_traffic_avg_phase3_percent' => $netTrafficAvgPhase3Percent,
+            'net_traffic_avg_phase1_percent' => $this->calcTrafficPercent($netTrafficAvgPhase1, $netTrafficLimit),
+            'net_traffic_avg_phase2_percent' => $this->calcTrafficPercent($netTrafficAvgPhase2, $netTrafficLimit),
+            'net_traffic_avg_phase3_percent' => $this->calcTrafficPercent($netTrafficAvgPhase3, $netTrafficLimit),
 
-            'net_traffic_idle'  => $netTrafficIdlePercent,
-            'net_traffic_limit' => $netTrafficLimitPercent,
-
+            'net_traffic_idle'  => 10, // percent
+            'net_traffic_limit' => 90, // percent
         ];
     }
 
     /**
      * @param  array            $vmPayload
      * @param  ProxtopServerVm  $vm
-     * @param  array            $rrdDataPerDay
+     * @param  array            $phases  result of getVmRrdPhases()
      *
      * @return array
      */
-    public function prepareDiskStats(array $vmPayload, ProxtopServerVm $vm, array $rrdDataPerDay): array
+    public function prepareDiskStats(array $vmPayload, ProxtopServerVm $vm, array $phases): array
     {
         $disk = (float) ($vmPayload['disk'] ?? 0.0);
         $maxDisk = (float) ($vmPayload['maxdisk'] ?? 0.0);
-        $diskPhase1 = round($this->getAvgRrdData($rrdDataPerDay, 'disk', $this->avgPhase1InMin));
-        $diskPhase2 = round($this->getAvgRrdData($rrdDataPerDay, 'disk', $this->avgPhase2InMin));
-        $diskPhase3 = round($this->getAvgRrdData($rrdDataPerDay, 'disk', $this->avgPhase3InMin));
+        $diskPhase1 = round($this->rrdValue($phases, 'phase1', 'disk'));
+        $diskPhase2 = round($this->rrdValue($phases, 'phase2', 'disk'));
+        $diskPhase3 = round($this->rrdValue($phases, 'phase3', 'disk'));
         $diskRead = $vmPayload['diskread'] ?? 0.0;
-        $diskReadAvgPhase1 = round($this->getAvgRrdData($rrdDataPerDay, 'diskread', $this->avgPhase1InMin));
-        $diskReadAvgPhase2 = round($this->getAvgRrdData($rrdDataPerDay, 'diskread', $this->avgPhase2InMin));
-        $diskReadAvgPhase3 = round($this->getAvgRrdData($rrdDataPerDay, 'diskread', $this->avgPhase3InMin));
-        $diskReadMaxPhase3 = round($this->getMaxRrdData($rrdDataPerDay, 'diskread', $this->avgPhase3InMin));
+        $diskReadAvgPhase1 = round($this->rrdValue($phases, 'phase1', 'diskread'));
+        $diskReadAvgPhase2 = round($this->rrdValue($phases, 'phase2', 'diskread'));
+        $diskReadAvgPhase3 = round($this->rrdValue($phases, 'phase3', 'diskread'));
+        $diskReadMaxPhase3 = round($this->rrdValue($phases, 'phase3', 'diskread', 'max'));
         $diskWrite = $vmPayload['diskwrite'] ?? 0.0;
-        $diskWriteAvgPhase1 = round($this->getAvgRrdData($rrdDataPerDay, 'diskwrite', $this->avgPhase1InMin));
-        $diskWriteAvgPhase2 = round($this->getAvgRrdData($rrdDataPerDay, 'diskwrite', $this->avgPhase2InMin));
-        $diskWriteAvgPhase3 = round($this->getAvgRrdData($rrdDataPerDay, 'diskwrite', $this->avgPhase3InMin));
-        $diskWriteMaxPhase3 = round($this->getMaxRrdData($rrdDataPerDay, 'diskwrite', $this->avgPhase3InMin));
-        $diskTraffic = $this->calcTraffic($diskRead, $diskWrite);
+        $diskWriteAvgPhase1 = round($this->rrdValue($phases, 'phase1', 'diskwrite'));
+        $diskWriteAvgPhase2 = round($this->rrdValue($phases, 'phase2', 'diskwrite'));
+        $diskWriteAvgPhase3 = round($this->rrdValue($phases, 'phase3', 'diskwrite'));
+        $diskWriteMaxPhase3 = round($this->rrdValue($phases, 'phase3', 'diskwrite', 'max'));
         $diskTrafficLimit = 300 * 1024 * 1204; // @todo: read max traffic disks
         $diskTrafficLimit = $vm->getTemplatesLowestNumber('disk_traffic_limit', $diskTrafficLimit);
         $diskTrafficMaxPhase3 = $this->calcTraffic($diskReadMaxPhase3, $diskWriteMaxPhase3);
@@ -444,12 +586,6 @@ class ProxmoxService extends BaseService
         $diskTrafficAvgPhase1 = $this->calcTraffic($diskReadAvgPhase1, $diskWriteAvgPhase1);
         $diskTrafficAvgPhase2 = $this->calcTraffic($diskReadAvgPhase2, $diskWriteAvgPhase2);
         $diskTrafficAvgPhase3 = $this->calcTraffic($diskReadAvgPhase3, $diskWriteAvgPhase3);
-        $diskTrafficAvgPhase1Percent = $this->calcTrafficPercent($diskTrafficAvgPhase1, $diskTrafficLimit);
-        $diskTrafficAvgPhase2Percent = $this->calcTrafficPercent($diskTrafficAvgPhase1, $diskTrafficLimit);
-        $diskTrafficAvgPhase3Percent = $this->calcTrafficPercent($diskTrafficAvgPhase1, $diskTrafficLimit);
-
-        $diskTrafficIdlePercent = 10;
-        $diskTrafficLimitPercent = 90;
 
         return [
             'disk_usage'                      => $maxDisk ? round(($disk / $maxDisk) * 100.0) : 0.0,
@@ -472,12 +608,13 @@ class ProxmoxService extends BaseService
             'disk_traffic_avg_phase2'         => $diskTrafficAvgPhase2,
             'disk_traffic_avg_phase3'         => $diskTrafficAvgPhase3,
             'disk_traffic_max_phase3'         => $diskTrafficMaxPhase3,
-            'disk_traffic_avg_phase1_percent' => $diskTrafficAvgPhase1Percent,
-            'disk_traffic_avg_phase2_percent' => $diskTrafficAvgPhase2Percent,
-            'disk_traffic_avg_phase3_percent' => $diskTrafficAvgPhase3Percent,
+            // phase 2 and 3 used the phase 1 value before (copy & paste error)
+            'disk_traffic_avg_phase1_percent' => $this->calcTrafficPercent($diskTrafficAvgPhase1, $diskTrafficLimit),
+            'disk_traffic_avg_phase2_percent' => $this->calcTrafficPercent($diskTrafficAvgPhase2, $diskTrafficLimit),
+            'disk_traffic_avg_phase3_percent' => $this->calcTrafficPercent($diskTrafficAvgPhase3, $diskTrafficLimit),
 
-            'disk_traffic_idle'  => $diskTrafficIdlePercent,
-            'disk_traffic_limit' => $diskTrafficLimitPercent,
+            'disk_traffic_idle'  => 10, // percent
+            'disk_traffic_limit' => 90, // percent
         ];
     }
 
@@ -490,8 +627,10 @@ class ProxmoxService extends BaseService
      */
     public function getCachedPreparedVmData(ProxtopServerVm $vm, array $serverResourcesCollections, bool $forceRefill = false): array
     {
-        if (!$forceRefill && ($c = $this->getCachedVmProperty($vm, null, []))) {
-            return $c;
+        // previous payload of this vm: returned as it is, or compared with the new one (hash, status)
+        $prevCachedVmPayload = $this->getCachedVmProperty($vm, null, []);
+        if (!$forceRefill && $prevCachedVmPayload) {
+            return $prevCachedVmPayload;
         }
 
         if (!($server = $vm->server)) {
@@ -500,11 +639,6 @@ class ProxmoxService extends BaseService
             return [];
         }
 
-        // get old/legacy cache data for all servers ...
-        $prevCachedResourcesTotalPayload = $this->getCache('resources', []);
-        // ... to get the previous cached vm data
-        $prevCachedVmPayload = $this->getVmPayloadData($vm, $prevCachedResourcesTotalPayload);
-
         /** @var Collection $serverResources */
         $serverResources = $serverResourcesCollections[$server->getKey()];
         /** @var array $vmPayload */
@@ -512,9 +646,8 @@ class ProxmoxService extends BaseService
                          ->where('type', $vm->vm_type)
                          ->first() ?? [];
 
-        // just get day once, 1440 entries for all minutes are involved
-        $rrdDataPerDay = $this->getServerApiCache($server->getKey(), "rrd_data.day.{$vm->getKey()}", []);
-        $this->avgPhase3InMin = count($rrdDataPerDay); // last day
+        // statistics of all phases (calculated by the RRD jobs, small)
+        $rrdPhases = $this->getVmRrdPhases($vm);
 
         // at first load important values to comparing by hash ...
         $vmNewPayload = [
@@ -541,9 +674,10 @@ class ProxmoxService extends BaseService
             'hash'         => $newHash,
             'hash_changed' => $hasBaseDataChanged,
             'uptime'       => $vmPayload['uptime'] ?? 0,
-            'avg_phase1'   => $this->avgPhase1InMin,
-            'avg_phase2'   => $this->avgPhase2InMin,
-            'avg_phase3'   => $this->avgPhase3InMin,
+            // length of the phases in minutes (labels like "10m", "1h", "1d")
+            'avg_phase1'   => $rrdPhases['phase1']['minutes'],
+            'avg_phase2'   => $rrdPhases['phase2']['minutes'],
+            'avg_phase3'   => $rrdPhases['phase3']['minutes'],
             'schedules'    => $vm->getTemplatesNextScheduleWindows(),
         ];
 
@@ -552,10 +686,10 @@ class ProxmoxService extends BaseService
         // @todo: make it experimental in settings?
         if (true) {
             // preparing all kind of stats
-            $vmNewPayload += $this->prepareCpuStats($vmPayload, $vm, $rrdDataPerDay);
-            $vmNewPayload += $this->prepareMemStats($vmPayload, $vm, $rrdDataPerDay);
-            $vmNewPayload += $this->prepareNetStats($vmPayload, $vm, $rrdDataPerDay);
-            $vmNewPayload += $this->prepareDiskStats($vmPayload, $vm, $rrdDataPerDay);
+            $vmNewPayload += $this->prepareCpuStats($vmPayload, $vm, $rrdPhases);
+            $vmNewPayload += $this->prepareMemStats($vmPayload, $vm, $rrdPhases);
+            $vmNewPayload += $this->prepareNetStats($vmPayload, $vm, $rrdPhases);
+            $vmNewPayload += $this->prepareDiskStats($vmPayload, $vm, $rrdPhases);
 
             // idle states
             $vmNewPayload['is_idle_cpu'] = $this->isCpuIdle($vmNewPayload, $vm);
@@ -602,13 +736,13 @@ class ProxmoxService extends BaseService
      */
     public function receiveResourcesAndBroadcast(): bool
     {
+        $this->forgetLegacyCache();
+
         // receive api data and update cache
         $this->receiveResources();
 
         // rebuild the whole new payload
         $resourcesTotalPayload = [];
-        // renew all prepared vm payloads ...
-        //$this->forgetCache('prepared_vms');
 
         // prepare the collections outside the loop
         $serverResourcesCollections = [];
@@ -616,7 +750,7 @@ class ProxmoxService extends BaseService
             ->where('api_allowed', true)
             ->get();
         foreach ($servers as $server) {
-            $serverResourcesCollections[$server->getKey()] = collect($this->getServerApiCache($server->getKey(), 'vms', []));
+            $serverResourcesCollections[$server->getKey()] = collect($this->getServerVms($server->getKey()));
         }
 
         /** @var Collection<ProxtopServerVm> $vmList */
@@ -673,10 +807,13 @@ class ProxmoxService extends BaseService
                 ->pluck('vm_id')
                 ->all();
 
+            // one cache round trip for all VMs of the template
+            $preparedVms = $this->getCachedVmProperties($propertyTemplate->vms);
+
             $activeVmNames = [];
             /** @var ProxtopServerVm $templateVm */
             foreach ($propertyTemplate->vms as $templateVm) {
-                $preparedVm = $this->getCachedVmProperty($templateVm, null, []);
+                $preparedVm = $preparedVms[$templateVm->getKey()] ?? [];
                 if ((($preparedVm['status'] ?? null) === ProxtopServerVm::StatusRunning)
                     || in_array($templateVm->getKey(), $startingVmIds)
                 ) {
@@ -717,7 +854,7 @@ class ProxmoxService extends BaseService
 
     /**
      * 1) Receive data by api for each server
-     * 2) Save data in cache (key self::CacheKeyProxmoxServerApi, indexed by [serverId])
+     * 2) Save data in cache (one key per server, see getServerVms())
      *
      * @param  callable|null  $callbackDebug
      *
@@ -758,10 +895,10 @@ class ProxmoxService extends BaseService
                 }
 
                 // fill/update cache
-                $this->setServerApiCache($server->getKey(), 'vms', $objBig['data'] ?? []);
+                $this->setServerVms($server->getKey(), $objBig['data'] ?? []);
 
                 if ($callbackDebug) {
-                    $callbackDebug("Resources Results: ".print_r($this->getServerApiCache($server->getKey(), 'vms'), true));
+                    $callbackDebug("Resources Results: ".print_r($this->getServerVms($server->getKey()), true));
                 }
 
                 // Disable all vms not found (delete later) ...
@@ -775,17 +912,25 @@ class ProxmoxService extends BaseService
     }
 
     /**
-     * Will only receive data if the cache by receiveResources() was already filled.
-     * Also, vm must be running. If so, cache is updated with 'rrd_data' for related vm.
-     * Otherwise, nothing happens or if vm is down rrd data wíll be removed.
+     * Fetches the RRD history of every running VM for one timeframe and caches its statistics
+     * (see calculateRrdStats()). The raw history is not cached.
      *
-     * @param  string         $timeframe
+     * Only works if receiveResources() already filled the cache (list of running VMs).
+     * Stopped VMs are skipped, their statistics expire after RrdCacheTtlSeconds.
+     *
+     * @param  string         $timeframe  key of RrdTimeframes
      * @param  callable|null  $callbackDebug
      *
-     * @return bool
+     * @return bool  false for an unknown timeframe
      */
     public function receiveRrdData(string $timeframe = 'hour', ?callable $callbackDebug = null): bool
     {
+        if (!isset(self::RrdTimeframes[$timeframe])) {
+            Log::error(sprintf("Unknown RRD timeframe '%s', see %s::RrdTimeframes", $timeframe, self::class));
+
+            return false;
+        }
+
         // for every server ...
         $servers = ProxtopServer::with([])
             ->where('api_allowed', true);
@@ -798,7 +943,7 @@ class ProxmoxService extends BaseService
                 ->first()
             ) {
 
-                foreach ($this->getServerApiCache($server->getKey(), 'vms', []) as $index => $item) {
+                foreach ($this->getServerVms($server->getKey()) as $index => $item) {
 
                     // if vm is not running, do not update stats form this vm ...
                     if (($item['status'] ?? null) !== ProxtopServerVm::StatusRunning) {
@@ -816,15 +961,14 @@ class ProxmoxService extends BaseService
                         // fetch new rrd data ...
                         $rrdData = $this->send($server, "nodes/{$vm->node}/{$vm->vm_type}/{$vm->extern_vm_id}/rrddata", queryParams: ['timeframe' => $timeframe]);
 
-                        // assign them to the cache
+                        // cache only the statistics, not the raw history
                         if ($rrdDataJson = json_decode($rrdData, true)) {
                             $rrdDataJson = $rrdDataJson['data'] ?? [];
 
-                            // update specific cache object
-                            $this->setServerApiCache($server->getKey(), "rrd_data.{$timeframe}.{$vm->getKey()}", $rrdDataJson);
+                            $this->setVmRrdStats($vm, $timeframe, $this->calculateRrdStats($timeframe, $rrdDataJson));
 
                             if ($callbackDebug) {
-                                $callbackDebug(sprintf("Fetched '%s' RRD from VM '%s' (%s entries)", $timeframe, $vm->getKey(), count($rrdDataJson)));
+                                $callbackDebug(sprintf("Fetched '%s' RRD from VM '%s' (%s entries, %s bytes)", $timeframe, $vm->getKey(), count($rrdDataJson), strlen($rrdData)));
                             }
                         }
                     }
@@ -833,51 +977,6 @@ class ProxmoxService extends BaseService
         }
 
         return true;
-    }
-
-    /**
-     * @param  array       $rrdData
-     * @param  string      $property
-     * @param  int         $lastItemsCount
-     * @param  mixed|null  $default
-     *
-     * @return mixed
-     */
-    public function getAvgRrdData(array $rrdData, string $property, int $lastItemsCount = 15, mixed $default = null): mixed
-    {
-        $recentData = array_slice($rrdData, -$lastItemsCount);
-
-        return (float) collect($recentData)->avg($property) ?? $default;
-    }
-
-    /**
-     * @param  array       $rrdData
-     * @param  string      $property
-     * @param  int         $lastItemsCount
-     * @param  mixed|null  $default
-     *
-     * @return mixed
-     */
-    public function getMinRrdData(array $rrdData, string $property, int $lastItemsCount = 15, mixed $default = null): mixed
-    {
-        $recentData = array_slice($rrdData, -$lastItemsCount);
-
-        return (float) collect($recentData)->min($property) ?? $default;
-    }
-
-    /**
-     * @param  array       $rrdData
-     * @param  string      $property
-     * @param  int         $lastItemsCount
-     * @param  mixed|null  $default
-     *
-     * @return mixed
-     */
-    public function getMaxRrdData(array $rrdData, string $property, int $lastItemsCount = 15, mixed $default = null): mixed
-    {
-        $recentData = array_slice($rrdData, -$lastItemsCount);
-
-        return (float) collect($recentData)->max($property) ?? $default;
     }
 
     /**
@@ -1009,65 +1108,104 @@ class ProxmoxService extends BaseService
     }
 
     /**
-     * @param  string  $path
+     * Small values of this service with an own cache key each, like 'resources'.
+     * The name is part of the key, it is not a path into an array.
+     *
+     * @param  string  $name
      * @param  mixed   $default
      *
      * @return mixed
      */
-    public function getCache(string $path, mixed $default = null): mixed
+    public function getCache(string $name, mixed $default = null): mixed
     {
-        return $this->cacheService->getCacheByPath($this->cacheKey, $path, $default);
+        return Cache::get($this->buildCacheKey($name)) ?? $default;
     }
 
     /**
-     * @param  string  $path
+     * @param  string  $name
      * @param  mixed   $value
      *
      * @return void
      */
-    public function setCache(string $path, mixed $value): void
+    public function setCache(string $name, mixed $value): void
     {
-        $this->cacheService->setCacheByPath($this->cacheKey, $path, $value);
+        Cache::forever($this->buildCacheKey($name), $value);
     }
 
     /**
-     * @param  ProxtopServerVm  $vm
-     * @param  string|null      $path
+     * @param  ProxtopServerVm|int  $vm
      *
      * @return string
      */
-    private function getCacheKeyForVmProperty(ProxtopServerVm $vm, ?string $path = null): string
+    protected function getCacheKeyForPreparedVm(ProxtopServerVm|int $vm): string
     {
-        $key = 'prepared_vms.'.$vm->getKey();
-        // if not path get whole object, otherwise specific ...
-        if ($path) {
-            $key .= '.'.$path;
-        }
-
-        return $key;
+        return $this->buildCacheKey('vm', $this->vmKey($vm), 'prepared');
     }
 
     /**
-     * @param  ProxtopServerVm  $vm
-     * @param  string|null      $path
-     * @param  mixed            $default
+     * Prepared payload of a VM (see getCachedPreparedVmData()).
+     *
+     * @param  ProxtopServerVm|int  $vm
+     * @param  string|null          $path  null = whole payload, otherwise a dot path inside it
+     * @param  mixed                $default
      *
      * @return mixed
      */
-    public function getCachedVmProperty(ProxtopServerVm $vm, ?string $path = null, mixed $default = null): mixed
+    public function getCachedVmProperty(ProxtopServerVm|int $vm, ?string $path = null, mixed $default = null): mixed
     {
-        return $this->getServerApiCache($vm->server_id, $this->getCacheKeyForVmProperty($vm, $path), $default);
+        $payload = Cache::get($this->getCacheKeyForPreparedVm($vm));
+
+        if ($path === null) {
+            return $payload ?? $default;
+        }
+
+        return data_get($payload ?? [], $path) ?? $default;
     }
 
     /**
-     * @param  ProxtopServerVm  $vm
-     * @param  string|null      $path
-     * @param  mixed            $value
+     * Prepared payloads of many VMs with one cache round trip.
+     *
+     * @param  iterable<ProxtopServerVm|int>  $vms
+     *
+     * @return array<int, array>  vm id => payload ([] if not cached)
+     */
+    public function getCachedVmProperties(iterable $vms): array
+    {
+        $keys = [];
+        foreach ($vms as $vm) {
+            $keys[$this->vmKey($vm)] = $this->getCacheKeyForPreparedVm($vm);
+        }
+        if (!$keys) {
+            return [];
+        }
+
+        $values = Cache::many(array_values($keys));
+
+        $result = [];
+        foreach ($keys as $vmId => $key) {
+            $result[$vmId] = $values[$key] ?? [];
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param  ProxtopServerVm|int  $vm
+     * @param  string|null          $path  null = replace the whole payload, otherwise a dot path inside it
+     * @param  mixed                $value
      *
      * @return void
      */
-    public function setCachedVmProperty(ProxtopServerVm $vm, ?string $path = null, mixed $value = null): void
+    public function setCachedVmProperty(ProxtopServerVm|int $vm, ?string $path = null, mixed $value = null): void
     {
-        $this->setServerApiCache($vm->server_id, $this->getCacheKeyForVmProperty($vm, $path), $value);
+        $key = $this->getCacheKeyForPreparedVm($vm);
+
+        if ($path !== null) {
+            $payload = Cache::get($key) ?? [];
+            data_set($payload, $path, $value);
+            $value = $payload;
+        }
+
+        Cache::forever($key, $value);
     }
 }

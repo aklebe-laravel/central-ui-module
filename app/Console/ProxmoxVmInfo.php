@@ -54,7 +54,7 @@ class ProxmoxVmInfo extends DeployEnvBase
         $serverResourcesCollections = [];
         $servers = ProxtopServer::with([])->where('api_allowed', true)->get();
         foreach ($servers as $server) {
-            $serverResourcesCollections[$server->getKey()] = collect($proxmoxService->getServerApiCache($server->getKey(), 'vms', []));
+            $serverResourcesCollections[$server->getKey()] = collect($proxmoxService->getServerVms($server->getKey()));
         }
         $this->info("Prepared/cached API Data:");
         $this->comment(print_r($proxmoxService->getCachedPreparedVmData($vm, $serverResourcesCollections), true));

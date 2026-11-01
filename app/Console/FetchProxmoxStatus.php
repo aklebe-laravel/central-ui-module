@@ -40,22 +40,18 @@ class FetchProxmoxStatus extends DeployEnvBase
             return CommandResult::FAILURE;
         }
 
-        // receive rrd data for at least 24h
-        if (!$proxmox->receiveRrdData('day', function ($msg) use ($proxmox) {
-            $this->info($msg);
-            //$this->info(print_r($proxmox->getServerApiCache(1, "rrd_data.day.2", []), true));
-        })
-        ) {
-            return CommandResult::FAILURE;
+        // RRD statistics of every timeframe (the scheduler fetches them in different intervals)
+        foreach (array_keys(ProxmoxService::RrdTimeframes) as $timeframe) {
+            if (!$proxmox->receiveRrdData($timeframe, function ($msg) {
+                $this->info($msg);
+            })
+            ) {
+                return CommandResult::FAILURE;
+            }
         }
 
-        //if (!$proxmox->receiveRrdData('hour', function ($msg) {
-        //    $this->info($msg);
-        //
-        //})
-        //) {
-        //    return CommandResult::FAILURE;
-        //}
+        // rebuild the payloads of the cards with the new statistics
+        $proxmox->receiveResourcesAndBroadcast();
 
         return CommandResult::SUCCESS;
     }

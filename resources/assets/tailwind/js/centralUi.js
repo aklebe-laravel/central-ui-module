@@ -93,7 +93,65 @@ export class CentralUi {
         classInstance.startCentralUi(classInstance);
 
 
+        // Broadcast channels shown by the update pulses (partials/update-bubble.blade.php): channel => event.
+        // The leading dot means "event name without namespace prefix" (same as in the Livewire #[On('echo:...')]).
+        const broadcastChannels = {
+            'proxmox-rrd-updates': '.Modules\\CentralUi\\app\\Events\\ProxmoxApiRrdDataUpdated',
+            'proxmox-resource-updates': '.Modules\\CentralUi\\app\\Events\\ProxmoxApiResourceDataUpdated',
+            'vm-updates': '.Modules\\CentralUi\\app\\Events\\LocalDesktopUpdated',
+        };
+        let broadcastBridged = false;
+
+        // One Echo listener per channel for the whole page (not one per card), forwarded as
+        // window event 'central-ui:broadcast' with detail.channel. Browser only, no server request.
+        const bridgeBroadcasts = () => {
+            if (broadcastBridged || !window.Echo) {
+                return;
+            }
+            broadcastBridged = true;
+
+            for (const [channel, event] of Object.entries(broadcastChannels)) {
+                window.Echo.channel(channel).listen(event, () => {
+                    window.dispatchEvent(new CustomEvent('central-ui:broadcast', {detail: {channel}}));
+                });
+            }
+        };
+
         const register = () => {
+            // Pulse of one broadcast channel (partials/update-bubble.blade.php).
+            window.Alpine.data('updateBubble', (channel) => ({
+                lastSeen: new Date().toLocaleTimeString(),
+                onBroadcast: null,
+
+                init() {
+                    bridgeBroadcasts();
+
+                    this.onBroadcast = (event) => {
+                        if (event.detail?.channel !== channel) {
+                            return;
+                        }
+                        this.lastSeen = new Date().toLocaleTimeString();
+                        this.pulse();
+                    };
+                    window.addEventListener('central-ui:broadcast', this.onBroadcast);
+                },
+
+                // restart the css animation
+                pulse() {
+                    const el = this.$refs.bubble;
+                    if (!el) {
+                        return;
+                    }
+                    el.style.animation = 'none';
+                    void el.offsetHeight;
+                    el.style.animation = null;
+                },
+
+                destroy() {
+                    window.removeEventListener('central-ui:broadcast', this.onBroadcast);
+                },
+            }));
+
             // total: full length of the grace period. A re-render starts the countdown again with the
             // remaining seconds, but the bar keeps its scale instead of jumping back to 100 %.
             window.Alpine.data('graceCountdown', (remaining, total = null) => ({

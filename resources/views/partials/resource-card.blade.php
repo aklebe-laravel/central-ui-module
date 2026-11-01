@@ -1,4 +1,26 @@
+{{--
+    Metric card of a VM (CPU, MEM, NET, DISK), used by livewire/vm-status.blade.php:
+    @include('central-ui::partials.resource-card', ['label' => ..., 'phase1Avg' => ..., ...])
+
+    Plain Blade on purpose. It was a Livewire component before: every card had 5 of them, and to show
+    new values they had to be re-mounted with a timestamp in their key on every update.
+    Now the values simply come with the re-render of the VM card.
+--}}
 @php
+    $icon ??= '';
+    $stableId ??= 'resource-card-default-1';
+    $label ??= '';
+    $phase1Avg = (float) ($phase1Avg ?? 0);
+    $phase2Avg = (float) ($phase2Avg ?? 0);
+    $phase3Avg = (float) ($phase3Avg ?? 0);
+    $idleValue = (float) ($idleValue ?? 0);
+    $limit = (float) ($limit ?? 0);
+    $customData ??= [];
+    $history ??= [];
+    $density ??= 'comfortable';
+    $colSpan ??= 1;
+    // synced with VmStatus::$styles
+    $styles ??= [];
     $lucideIcon = "lucide-{$icon}";
 @endphp
 <div class="col-span-{{ $colSpan }} p-2 bg-surface-50 border border-surface-200 rounded-lg shadow-sm hover:border-primary-500/50 transition-all duration-300">

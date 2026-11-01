@@ -4,11 +4,13 @@ declare(strict_types = 1);
 namespace Modules\CentralUi\app\Providers;
 
 use Illuminate\Console\Scheduling\Schedule;
+use Illuminate\Support\Facades\Cache;
 use Modules\CentralUi\app\Events\LocalDesktopUpdated;
 use Modules\CentralUi\app\Jobs\RefreshProxmoxDataJob;
 use Modules\CentralUi\app\Jobs\ShutdownVmJob;
 use Modules\CentralUi\app\Jobs\StartVmJob;
 use Modules\CentralUi\app\Models\ProxtopServerAction;
+use Modules\CentralUi\app\Services\ProxmoxService;
 use Modules\CentralUi\app\Services\SafeBroadcast;
 use Modules\SystemBase\app\Providers\Base\ScheduleBaseServiceProvider;
 
@@ -43,7 +45,9 @@ class ScheduleServiceProvider extends ScheduleBaseServiceProvider
                 $config = app('website_base_config');
 
                 $intervals['resource'] = (int) $config->getValue('scheduler.api.resource.interval', 30, module: 'central-ui');
-                $intervals['rrd'] = (int) $config->getValue('scheduler.api.rrd.interval', 60, module: 'central-ui');
+                foreach (ProxmoxService::RrdTimeframes as $timeframe => $definition) {
+                    $intervals['rrd'][$timeframe] = (int) $config->getValue($definition['config'], $definition['interval'], module: 'central-ui');
+                }
                 $intervals['desktop'] = (int) $config->getValue('scheduler.frontend.desktop.interval', 0, module: 'central-ui');
                 // 'scheduler.api.action.interval' is no longer used: due actions are
                 // checked on EVERY tick now (a cheap indexed query), see step 4.
@@ -58,11 +62,14 @@ class ScheduleServiceProvider extends ScheduleBaseServiceProvider
                 RefreshProxmoxDataJob::dispatch(RefreshProxmoxDataJob::PartResources);
             }
 
-            // 3. RRD history: only dispatch, the job does the work
-            if ($currentTime - ($lastRuns['rrd'] ?? 0) >= $intervals['rrd']) {
-                $lastRuns['rrd'] = $currentTime;
-
-                RefreshProxmoxDataJob::dispatch(RefreshProxmoxDataJob::PartRrd);
+            // 3. RRD statistics, one job per timeframe: only dispatch, the job does the work.
+            // The last run is kept in the cache instead of $lastRuns: the static variables are lost
+            // with every new scheduler process (each minute), so intervals > 60s would not work.
+            // Cache::add() only succeeds if the key does not exist (expires after the interval).
+            foreach ($intervals['rrd'] as $timeframe => $interval) {
+                if ($interval > 0 && Cache::add('central-ui.scheduler.rrd.'.$timeframe, $currentTime, $interval)) {
+                    RefreshProxmoxDataJob::dispatch(RefreshProxmoxDataJob::PartRrd, $timeframe);
+                }
             }
 
             // 4. Due database actions (start / shutdown / expiring pending locks).

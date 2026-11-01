@@ -52,7 +52,7 @@ class ProxmoxInfo extends DeployEnvBase
             case 'raw':
                 $servers = ProxtopServer::with([])->where('api_allowed', true)->get();
                 foreach ($servers as $server) {
-                    $result = $proxmoxService->getServerApiCache($server->getKey(), 'vms');
+                    $result = $proxmoxService->getServerVms($server->getKey());
                     $this->info(sprintf("Cached raw resources server: %s", $server->getKey()));
                     $this->comment(print_r($result, true));
                 }

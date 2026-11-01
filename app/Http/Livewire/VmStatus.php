@@ -55,27 +55,6 @@ class VmStatus extends BaseComponent
     public int $observeItemId = 0;
 
     /**
-     * Last update for api rrd data
-     *
-     * @var int
-     */
-    public int $lastRrdUpdate = 0;
-
-    /**
-     * Last update for api resources
-     *
-     * @var int
-     */
-    public int $lastServerUpdate = 0;
-
-    /**
-     * Last update for desktop trigger
-     *
-     * @var int
-     */
-    public int $lastDesktopUpdate = 0;
-
-    /**
      * @var int
      */
     public int $refreshEnterCount = 0;
@@ -214,28 +193,24 @@ class VmStatus extends BaseComponent
 
     // ------------------------------------------------------------------
     // Live updates (Echo)
+    //
+    // Every listener here costs one server round trip per card and browser,
+    // so the card only listens to events that change what it shows:
+    //  - resource updates: the payload of the card is rebuilt (ProxmoxService::receiveResourcesAndBroadcast())
+    //  - desktop updates:  actions like start/shutdown/grace of any user
+    // Not the RRD updates: the RRD job only writes statistics, they reach the card
+    // with the next resource update. The pulses (partials/update-bubble) listen in the browser only.
     // ------------------------------------------------------------------
 
     /**
      * Echo-Event syntax: "echo:{channel},{event}"
-     *
-     * @return void
-     */
-    #[On('echo:proxmox-rrd-updates,.Modules\CentralUi\app\Events\ProxmoxApiRrdDataUpdated')]
-    public function receiveApiRrdUpdates(): void
-    {
-        $this->lastRrdUpdate = time();
-    }
-
-    /**
-     * Echo-Event syntax: "echo:{channel},{event}"
+     * Empty on purpose: the event itself re-renders the card with the new payload.
      *
      * @return void
      */
     #[On('echo:proxmox-resource-updates,.Modules\CentralUi\app\Events\ProxmoxApiResourceDataUpdated')]
     public function receiveApiResourcesUpdates(): void
     {
-        $this->lastServerUpdate = time();
     }
 
     /**
@@ -249,7 +224,6 @@ class VmStatus extends BaseComponent
     #[On('vm-desktop:poll')]
     public function receiveDesktopUpdates(): void
     {
-        $this->lastDesktopUpdate = time();
     }
 
     // ------------------------------------------------------------------
@@ -593,36 +567,18 @@ class VmStatus extends BaseComponent
     }
 
     // ------------------------------------------------------------------
-    // Stable keys (unchanged)
+    // Stable keys
     // ------------------------------------------------------------------
 
     /**
+     * Without a timestamp: a key that changes with every update re-mounts everything below it.
+     *
      * @param  string  $suffix
      *
      * @return string
      */
     public function getStableKey(string $suffix = ''): string
     {
-        return parent::getStableKey($suffix).'-'.$this->observeItem?->getKey().'-'.$this->lastDesktopUpdate;
-    }
-
-    /**
-     * @param  string  $suffix
-     *
-     * @return string
-     */
-    public function getStableKeyForServerUpdateRrd(string $suffix = ''): string
-    {
-        return parent::getStableKey($suffix).'-'.$this->observeItem?->getKey().'-'.$this->lastRrdUpdate;
-    }
-
-    /**
-     * @param  string  $suffix
-     *
-     * @return string
-     */
-    public function getStableKeyForServerUpdate(string $suffix = ''): string
-    {
-        return parent::getStableKey($suffix).'-'.$this->observeItem?->getKey().'-'.$this->lastServerUpdate;
+        return parent::getStableKey($suffix).'-'.$this->observeItem?->getKey();
     }
 }

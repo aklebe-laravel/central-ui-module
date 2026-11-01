@@ -125,24 +125,9 @@ $showDetails = (($density ?? '') !== '');
             <div class="mt-0 py-0 px-1 mb-2 font-bold tracking-tight">
                 <div class="grid grid-cols-[auto_1fr]">
                     <div class="flex {{ $this->observeItemData['status_has_stopped'] ? 'opacity-50' : '' }}">
-                        <livewire:central-ui::update-bubble
-                                :minimalistic="true"
-                                label="API RRD Update"
-                                channel="proxmox-rrd-updates"
-                                event=".Modules\CentralUi\app\Events\ProxmoxApiRrdDataUpdated"
-                                wire:key="update-bubble-1-{{$this->observeItemId}}-{{$this->lastRrdUpdate}}"/>
-                        <livewire:central-ui::update-bubble
-                                :minimalistic="true"
-                                label="API Resource Update"
-                                channel="proxmox-resource-updates"
-                                event=".Modules\CentralUi\app\Events\ProxmoxApiResourceDataUpdated"
-                                wire:key="update-bubble-2-{{$this->observeItemId}}-{{$this->lastServerUpdate}}"/>
-                        <livewire:central-ui::update-bubble
-                                :minimalistic="true"
-                                label="Local Desktop Update"
-                                channel="vm-updates"
-                                event=".Modules\CentralUi\app\Events\LocalDesktopUpdated"
-                                wire:key="update-bubble-3-{{$this->observeItemId}}-{{$this->lastDesktopUpdate}}"/>
+                        @include('central-ui::partials.update-bubble', ['channel' => 'proxmox-rrd-updates', 'label' => 'API RRD Update', 'key' => "update-bubble-1-{$this->observeItemId}"])
+                        @include('central-ui::partials.update-bubble', ['channel' => 'proxmox-resource-updates', 'label' => 'API Resource Update', 'key' => "update-bubble-2-{$this->observeItemId}"])
+                        @include('central-ui::partials.update-bubble', ['channel' => 'vm-updates', 'label' => 'Local Desktop Update', 'key' => "update-bubble-3-{$this->observeItemId}"])
                     </div>
                     <div class="mx-1 text-nowrap text-secondary-800 text-left {{ $isIcons ? 'text-sm truncate min-w-0' : 'text-xl' }}"
                          title="{{ $this->observeItemData['name'] }}">
@@ -242,7 +227,7 @@ $showDetails = (($density ?? '') !== '');
                     <div class="overflow-hidden">
                         @if($this->observeItemData['status_is_running'])
                             <div class="grid {{ $isIcons ? 'grid-cols-1' : 'grid-cols-2' }} gap-1">
-                                @livewire('central-ui::resource-card', [
+                                @include('central-ui::partials.resource-card', [
                                     'stableId' => "popup-res-card-cpu-vm-{$this->observeItem->getKey()}",
                                     'styles' => $styles,
                                     'colSpan' => $isIcons ? 1 : 2,
@@ -286,8 +271,8 @@ $showDetails = (($density ?? '') !== '');
                                           'style' => $styles['limit']['text'] ?? null,
                                         ],
                                     ],
-                                ], key($this->getStableKeyForServerUpdateRrd('res-card-cpu')))
-                                @livewire('central-ui::resource-card', [
+                                ])
+                                @include('central-ui::partials.resource-card', [
                                     'stableId' => "popup-res-card-mem-vm-{$this->observeItem->getKey()}",
                                     'styles' => $styles,
                                     'label' => 'MEM',
@@ -349,8 +334,8 @@ $showDetails = (($density ?? '') !== '');
                                           'style' => $styles['phase3']['text'] ?? null,
                                         ],
                                     ],
-                                ], key($this->getStableKeyForServerUpdateRrd('res-card-mem')))
-                                @livewire('central-ui::resource-card', [
+                                ])
+                                @include('central-ui::partials.resource-card', [
                                     'stableId' => "popup-res-card-net-traffic-vm-{$this->observeItem->getKey()}",
                                     'styles' => $styles,
                                     'icon' => 'wifi',
@@ -453,8 +438,8 @@ $showDetails = (($density ?? '') !== '');
                                           'style' => $styles['phase3']['text'] ?? null,
                                         ],
                                     ],
-                                ], key($this->getStableKeyForServerUpdateRrd('res-card-net-traffic')))
-                                @livewire('central-ui::resource-card', [
+                                ])
+                                @include('central-ui::partials.resource-card', [
                                     'stableId' => "popup-res-card-disk-traffic-vm-{$this->observeItem->getKey()}",
                                     'styles' => $styles,
                                     'label' => 'DISK Traffic',
@@ -549,8 +534,8 @@ $showDetails = (($density ?? '') !== '');
                                           'style' => $styles['limit']['text'] ?? null,
                                         ],
                                     ],
-                                ], key($this->getStableKeyForServerUpdateRrd('res-card-disk-traffic')))
-                                @livewire('central-ui::resource-card', [
+                                ])
+                                @include('central-ui::partials.resource-card', [
                                     'stableId' => "popup-res-card-disk-vm-{$this->observeItem->getKey()}",
                                     'styles' => $styles,
                                     'label' => 'DISK',
@@ -566,7 +551,7 @@ $showDetails = (($density ?? '') !== '');
                                         'Disk Free' =>  $systemBase->bytesToHuman($this->observeItemData['disk_free'] ?? 0),
                                         'Disk Max' =>  $systemBase->bytesToHuman($this->observeItemData['maxdisk'] ?? 0),
                                     ],
-                                ], key($this->getStableKeyForServerUpdateRrd('res-card-disk')))
+                                ])
                             </div>
                         @else
                             <div class="py-4 flex items-center justify-center text-secondary-900">
@@ -575,7 +560,7 @@ $showDetails = (($density ?? '') !== '');
                         @endif
                     </div>
                 </div>
-                <div class="text-[10px] mt-2 text-content-muted" wire:key="vm-last-seen-{{$this->observeItemId}}-{{$this->lastRrdUpdate}}">
+                <div class="text-[10px] mt-2 text-content-muted" wire:key="vm-last-seen-{{$this->observeItemId}}">
                     <div class="inline-block text-[10px] badge badge-muted rounded-full">
                         @if ($this->observeItemData['status_is_running'])
                             <span>{{ __('Online') }} {{ sprintf("%02d:%02d:%02d", $onlineSince->days, $onlineSince->h, $onlineSince->i) }}</span>

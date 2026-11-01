@@ -121,6 +121,76 @@ Requirements:
   config `central-ui.queues.vm_actions` (e.g. `vm-actions`) plus a worker with `--queue=vm-actions`,
   the same for `central-ui.queues.proxmox_refresh`. Without these keys everything runs on `default`.
 
+## Caching and statistics
+
+All Proxmox data comes from queued jobs and is cached. The desktop cards never call the API, they only
+read the cache. Every piece of data has its own key, nothing large is read for a single VM.
+
+| Cache key (prefix `central-ui.proxmox.`) | Written by                        | Read by                    | Size         |
+|------------------------------------------|-----------------------------------|----------------------------|--------------|
+| `server.<serverId>.vms`                  | resource job (`receiveResources`) | resource job, RRD jobs     | small        |
+| `vm.<vmId>.rrd_stats.<timeframe>`        | RRD job of the timeframe          | resource job               | < 1 KB       |
+| `vm.<vmId>.prepared`                     | resource job (payload rebuild)    | desktop cards (`VmStatus`) | a few KB     |
+| `resources`                              | resource job                      | console commands only      | all payloads |
+
+`<vmId>` is the database id (`proxtop_server_vms.id`), not the Proxmox VMID.
+The raw RRD history is not cached (`timeframe=day` is ~450 KB per VM), only its statistics.
+
+### Flow
+
+```
+scheduler (every 2s, only dispatches)
+ ├─ resource job   every scheduler.api.resource.interval (30s)
+ │    cluster/resources → server.<id>.vms
+ │    per VM: vms + rrd_stats + templates → vm.<id>.prepared → broadcast → cards re-render
+ └─ RRD job        one per timeframe, see ProxmoxService::RrdTimeframes
+      hour: every scheduler.api.rrd.interval     (60s)   → phase 1 (10 min), phase 2 (60 min)
+      day:  every scheduler.api.rrd_day.interval (1800s) → phase 3 (whole day)
+      per running VM: rrddata → RrdStats (avg/max per metric) → vm.<id>.rrd_stats.<timeframe>
+```
+
+The intervals are core configs of the module (Admin, deployment `0007`). `0` disables a timeframe.
+
+### Live updates in the browser
+
+Every Livewire listener costs one server round trip per card and open browser, so only what changes the
+card re-renders it:
+
+| Broadcast (channel)                                          | Re-renders              | Why                                                      |
+|--------------------------------------------------------------|-------------------------|----------------------------------------------------------|
+| `ProxmoxApiResourceDataUpdated` (`proxmox-resource-updates`) | every card (`VmStatus`) | new payload in `vm.<id>.prepared`                        |
+| `LocalDesktopUpdated` (`vm-updates`)                         | every card (`VmStatus`) | start/shutdown/grace of any user                         |
+| `ProxmoxApiRrdDataUpdated` (`proxmox-rrd-updates`)           | nothing                 | statistics reach the cards with the next resource update |
+
+- The desktop (`VmDesktop`) listens to none of them (its `init()` runs on every request).
+- The pulses on the cards (`partials/update-bubble.blade.php`, Alpine `updateBubble` in `centralUi.js`) show
+  all three channels without any server request: one Echo subscription per channel for the whole page.
+- The metric boxes (`partials/resource-card.blade.php`) are plain Blade, they update with the card.
+- Avoid timestamps in `wire:key`: a changing key re-mounts everything below it on every update.
+- Websocket down: `liveUpdateFallback` refreshes the cards every 20 seconds (`vm-desktop:poll`).
+
+### Extending
+
+All definitions are constants in `ProxmoxService` (and `RrdStats` for the metrics), nothing else has to change:
+
+- **New metric** from the RRD entries (like `maxcpu`): add it to `RrdStats::METRICS`.
+  Every phase then contains `avg.<metric>` and `max.<metric>`. Use it in a `prepare*Stats()` method
+  with `$this->rrdValue($phases, 'phase1', '<metric>')` (or `'max'` as 4th argument).
+- **New phase** (like 6 hours): add it to `ProxmoxService::RrdPhases` with its timeframe and minutes.
+- **New timeframe** (like `week`): add it to `ProxmoxService::RrdTimeframes` with config path and default
+  interval (and a core config row in a new deployment). The scheduler dispatches its job automatically.
+- **New cached data**: one key per VM/server with `buildCacheKey()`, a getter/setter pair in `ProxmoxService`
+  and a row in the table above. Never put a list of all VMs with large data into one key.
+
+### Debugging
+
+```
+php artisan central-ui:fetch                       # fetch everything now and rebuild the payloads
+php artisan tinker
+> app(\Modules\CentralUi\app\Services\ProxmoxService::class)->getVmRrdPhases(5)
+> Cache::get('central-ui.proxmox.vm.5.prepared')
+```
+
 ## License
 
 MIT, see [LICENSE.md](LICENSE.md).
