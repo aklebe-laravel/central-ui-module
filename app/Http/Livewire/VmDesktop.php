@@ -6,14 +6,13 @@ namespace Modules\CentralUi\app\Http\Livewire;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Contracts\View\Factory;
 use Illuminate\Contracts\View\View;
-use Illuminate\Support\Collection;
-use Livewire\Attributes\On;
-use Modules\CentralUi\app\Models\ProxtopObserveServerItem;
-use Modules\CentralUi\app\Models\ProxtopServerVm;
-use Modules\CentralUi\app\Services\ProxmoxService;
 use Modules\SystemBase\app\Http\Livewire\BaseComponent;
-use Modules\WebsiteBase\app\Services\Setting;
 
+/**
+ * The desktop: live update fallback, the form of the observe items and the cards, which are the
+ * data table VmDesktopItems (one VmStatus component per VM). VmDesktopItems reads the user settings
+ * (layout, details) itself, the constants and options of these settings stay here.
+ */
 class VmDesktop extends BaseComponent
 {
     /**
@@ -73,84 +72,13 @@ class VmDesktop extends BaseComponent
     }
 
     /**
-     * @var string
-     */
-    public string $statusMessage = '';
-
-    /**
-     * @var ?Collection|null
-     */
-    public ?Collection $observeItemIds = null;
-
-    /**
-     * @var ?string
-     */
-    public ?string $globalDesktopVmDetails = '';
-
-    /**
-     * One of self::LAYOUTS (user setting 'desktop_layout')
-     *
-     * @var string
-     */
-    public string $globalDesktopLayout = self::LAYOUT_COMPACT;
-
-    /**
-     * @var ProxmoxService
-     */
-    protected ProxmoxService $proxmox;
-
-    /**
-     * @var Setting
-     */
-    protected Setting $system;
-
-    /**
-     * @param  string  $state
-     *
-     * @return void
-     */
-    #[On('toggle-details')]
-    public function toggle(string $state): void
-    {
-        $this->globalDesktopVmDetails = $state;
-    }
-
-    /**
-     * @param  string  $layout
-     *
-     * @return void
-     */
-    #[On('toggle-layout')]
-    public function toggleLayout(string $layout): void
-    {
-        $this->globalDesktopLayout = $this->sanitizeLayout($layout);
-    }
-
-    /**
-     * wire:key of a desktop card (VmStatus).
-     * Contains layout and details, so a change of these settings (user menu or profile)
-     * mounts all cards fresh instead of morphing the old markup.
-     *
-     * @param  int|string  $observeItemId
-     *
-     * @return string
-     */
-    public function getCardKey(int|string $observeItemId): string
-    {
-        return sprintf('desktop-observe-item-%s-%s-%s',
-            $observeItemId,
-            $this->globalDesktopLayout,
-            $this->globalDesktopVmDetails ?: 'none');
-    }
-
-    /**
      * Unknown values fall back to the compact layout.
      *
      * @param  mixed  $layout
      *
      * @return string
      */
-    public function sanitizeLayout(mixed $layout): string
+    public static function sanitizeLayout(mixed $layout): string
     {
         return in_array($layout, self::LAYOUTS, true) ? $layout : self::LAYOUT_COMPACT;
     }
@@ -162,69 +90,4 @@ class VmDesktop extends BaseComponent
     {
         return view('central-ui::livewire.vm-desktop');
     }
-
-    /**
-     * Re-renders the desktop after the user changed the desktop settings (UserDesktopSettings).
-     *
-     * The desktop itself does NOT listen to the Echo events: every request runs init()
-     * (list of visible items with templates), and the cards (VmStatus) listen themselves.
-     *
-     * @return void
-     */
-    #[On('vm-desktop:refresh')]
-    public function receiveDesktopUpdates(): void
-    {
-    }
-
-    /**
-     * Runs on mount AND on every hydrate (see BaseComponent), so on every request of this component.
-     *
-     * @return void
-     */
-    protected function init(): void
-    {
-        parent::init();
-
-        $this->proxmox = app(ProxmoxService::class);
-        $this->system = app(Setting::class);
-        $this->observeItemIds = $this->getObserveItemIds();
-    }
-
-    /**
-     * Runs on every request, after the component is mounted or hydrated, but before any update methods are called
-     *
-     * @return void
-     */
-    protected function initBooted(): void
-    {
-        parent::initBooted();
-
-        if ($currentUser = app('website_base_settings')->currentUser()) {
-            $this->globalDesktopVmDetails = $currentUser->getExtraAttribute('desktop_vm_details', '');
-            $this->globalDesktopLayout = $this->sanitizeLayout($currentUser->getExtraAttribute('desktop_layout',
-                self::LAYOUT_COMPACT));
-        }
-    }
-
-    /**
-     * @return Collection
-     */
-    protected function getObserveItemIds(): Collection
-    {
-        $user = app('website_base_settings')->currentUser();
-
-        // load the user's acl codes once for all items
-        $userAclCodes = ProxtopServerVm::getUserAclCodes($user);
-
-        return $user->observeItems()
-            ->whereIsEnabledAndHasActiveServer()
-            ->with('vm.enabledPropertyTemplates')
-            ->orderBy('position')
-            ->get()
-            // hide items whose vm is no longer visible for this user (acl_res_view)
-            ->filter(fn(ProxtopObserveServerItem $item) => (bool) $item->vm?->isVisibleForAclCodes($userAclCodes))
-            ->pluck('id')
-            ->values();
-    }
-
 }

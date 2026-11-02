@@ -4,6 +4,7 @@ namespace Modules\CentralUi\app\Http\Livewire\DataTable;
 
 use Livewire\Attributes\On;
 use Modules\CentralUi\app\Events\LocalDesktopUpdated;
+use Modules\CentralUi\app\Services\SafeBroadcast;
 use Modules\WebsiteBase\app\Http\Livewire\DataTable\Base\DefaultDataTable;
 
 class ProxtopObserveServerItem extends DefaultDataTable
@@ -143,7 +144,7 @@ class ProxtopObserveServerItem extends DefaultDataTable
         if ($result = parent::deleteItem($livewireId, $itemId)) {
 
             // update desktops
-            broadcast(new LocalDesktopUpdated());
+            SafeBroadcast::send(new LocalDesktopUpdated());
         }
 
         return $result;
@@ -163,7 +164,7 @@ class ProxtopObserveServerItem extends DefaultDataTable
         parent::updateOrder($collectionName, $movedId, $prevId, $nextId);
 
         // update desktops
-        broadcast(new LocalDesktopUpdated());
+        SafeBroadcast::send(new LocalDesktopUpdated());
     }
 
 }

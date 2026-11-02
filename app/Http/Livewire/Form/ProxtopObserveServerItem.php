@@ -177,7 +177,7 @@ class ProxtopObserveServerItem extends ModelBase
                                         'description'  => __('Order in listings. Automatically calculated.'),
                                         'validator'    => ['nullable', 'numeric'],
                                     ],
-                                    'media_item_id' => app(WebsiteBaseFormService::class)->getFormElementImagePickerMediaItems(scope: 'images'),
+                                    'media_item_id' => app(WebsiteBaseFormService::class)->getFormElementImagePickerMediaItems(),
                                     'description'   => [
                                         'html_element' => 'textarea',
                                         'label'        => __('Description'),

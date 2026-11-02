@@ -141,7 +141,7 @@ class ProxtopServerVm extends ModelBase
                                         'description'  => __('Image'),
                                         'css_group'    => '',
                                     ],
-                                    'media_item_id'        => app(WebsiteBaseFormService::class)->getFormElementImagePickerMediaItems(scope: 'images'),
+                                    'media_item_id'        => app(WebsiteBaseFormService::class)->getFormElementImagePickerMediaItems(),
                                     'description'          => [
                                         'html_element' => 'textarea',
                                         'label'        => __('Description'),

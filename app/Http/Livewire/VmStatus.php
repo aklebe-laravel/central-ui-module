@@ -12,7 +12,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\View\ComponentAttributeBag;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\On;
-use Livewire\Attributes\Reactive;
+use Livewire\Attributes\Locked;
 use Modules\CentralUi\app\Enums\VmUiState;
 use Modules\CentralUi\app\Events\LocalDesktopUpdated;
 use Modules\CentralUi\app\Models\ProxtopObserveServerItem;
@@ -32,26 +32,33 @@ class VmStatus extends BaseComponent
      */
     private const int GRACE_SECONDS = 10;
 
+    /*
+     * The three props are set once at mount and Locked, not Reactive: a reactive child is re-rendered
+     * (committed) with every request of its parent, which recomputed all cards for each search input or
+     * layout switch of VmDesktopItems. A change of layout or details changes the wire:key anyway
+     * (VmDesktopItems::getCardKey()), so the card is mounted fresh with the new values.
+     */
+
     /**
-     * synced with 'globalDesktopVmDetails' from parent
+     * User setting 'desktop_vm_details', given by VmDesktopItems
      *
      * @var ?string
      */
-    #[Reactive]
-    public ?string $density;
+    #[Locked]
+    public ?string $density = '';
 
     /**
-     * synced with 'globalDesktopLayout' from parent (compact, icons, list)
+     * User setting 'desktop_layout' (compact, icons, list), given by VmDesktopItems
      *
      * @var string
      */
-    #[Reactive]
+    #[Locked]
     public string $layout = VmDesktop::LAYOUT_COMPACT;
 
     /**
      * @var int
      */
-    #[Reactive]
+    #[Locked]
     public int $observeItemId = 0;
 
     /**
@@ -115,12 +122,12 @@ class VmStatus extends BaseComponent
     }
 
     /**
-     * Column template of the desktop list layout.
-     * Used by the list header (vm-desktop.blade.php) and every row (vm-status.blade.php).
+     * Column template of the desktop list layout (inside the "Status" column of the data table VmDesktopItems,
+     * name and actions are columns of the data table).
      *
-     * With details: image, name, status, cpu, ram, disk, online (lg+), switch.
-     * Without details (user setting 'desktop_vm_details' = ''): image, name, status, switch.
-     * Mobile shows image, name, status and switch.
+     * With details: image, status, cpu, ram, disk, online (lg+), switch.
+     * Without details (user setting 'desktop_vm_details' = ''): image, status, switch.
+     * Mobile shows status and switch (the hidden cells take no grid column).
      *
      * Keep the class strings complete (no concatenated fragments), Tailwind scans them as they are.
      *
@@ -130,13 +137,32 @@ class VmStatus extends BaseComponent
      */
     public static function listGridCss(bool $withDetails = true): string
     {
-        $base = 'grid items-center gap-x-2 md:gap-x-3 px-3 py-2 grid-cols-[2.5rem_minmax(0,1fr)_auto_5rem] ';
+        $base = 'grid items-center gap-x-2 md:gap-x-3 px-3 py-2 grid-cols-[minmax(0,1fr)_5rem] ';
 
         if (!$withDetails) {
-            return $base.'md:grid-cols-[2.5rem_minmax(0,1fr)_6rem_7rem]';
+            return $base.'md:grid-cols-[2.5rem_6rem_7rem]';
         }
 
-        return $base.'md:grid-cols-[2.5rem_minmax(0,1fr)_6rem_5rem_5rem_5rem_7rem] '.'lg:grid-cols-[2.5rem_minmax(0,1fr)_6rem_5rem_5rem_5rem_7rem_7rem]';
+        return $base.'md:grid-cols-[2.5rem_6rem_5rem_5rem_5rem_7rem] lg:grid-cols-[2.5rem_6rem_5rem_5rem_5rem_7rem_7rem]';
+    }
+
+    /**
+     * Shown while the card loads ('lazy' in VmDesktopItems): the desktop (or a new layout) appears at once,
+     * the cards fill in afterwards instead of rendering all of them in one request.
+     * Same outer element as the view, roughly the size of the real card.
+     *
+     * @param  array  $params  the component parameters (layout, density, observeItemId)
+     *
+     * @return string
+     */
+    public function placeholder(array $params = []): string
+    {
+        if (($params['layout'] ?? null) === VmDesktop::LAYOUT_LIST) {
+            return '<div><div class="px-3 py-2"><div class="h-10 w-full max-w-md animate-pulse rounded-lg bg-surface-200/60"></div></div></div>';
+        }
+
+        return '<div class="flex flex-1 flex-col items-center justify-center gap-3 py-2">'.'<div class="aspect-square w-3/4 animate-pulse rounded-2xl bg-surface-200/60"></div>'.'<div class="h-4 w-1/2 animate-pulse rounded bg-surface-200/60"></div>'
+               .'</div>';
     }
 
     /**

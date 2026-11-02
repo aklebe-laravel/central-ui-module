@@ -40,11 +40,13 @@ $showDetails = (($density ?? '') !== '');
 <div @class(['flex flex-1 flex-col' => $layout !== VmDesktop::LAYOUT_LIST])>
     @if ($dataAvailable && $layout === VmDesktop::LAYOUT_LIST)
         {{-- ------------------------------------------------------------------ --}}
-        {{-- Layout "list": one row, columns see VmStatus::listGridCss()         --}}
+        {{-- Layout "list": image, status, stats and switch of a data table row, --}}
+        {{-- columns see VmStatus::listGridCss(). Name, ID and actions are      --}}
+        {{-- columns of the data table VmDesktopItems.                           --}}
         {{-- ------------------------------------------------------------------ --}}
-        <div class="{{ VmStatus::listGridCss($showDetails) }} hover:bg-surface-200/50 transition-colors">
-            {{-- image --}}
-            <div>
+        <div class="{{ VmStatus::listGridCss($showDetails) }}">
+            {{-- image (live: busy animation, dimmed when offline), hidden on mobile --}}
+            <div class="hidden md:block">
                 {{-- no @if around the tags: Livewire needs balanced blocks to update the image live --}}
                 <a {{ VmStatus::imageLinkAttributes($d['url']) }}>
                     <img class="h-10 w-10 rounded-lg object-cover bg-surface-100 border-[0.5px] {{ $stateBorder }} {{ $imageOpacity }} {{ $d['status_is_locked'] ? 'animate-pulse' : '' }}"
@@ -52,16 +54,8 @@ $showDetails = (($density ?? '') !== '');
                 </a>
             </div>
 
-            {{-- name --}}
-            <div class="min-w-0">
-                <div class="truncate font-semibold text-secondary-800" title="{{ $d['name'] }}">{{ $d['name'] }}</div>
-                <div class="text-[10px] text-secondary-400">
-                    ID {{ $this->observeItem->vm->extern_vm_id }}
-                </div>
-            </div>
-
             {{-- status --}}
-            <div class="text-center">
+            <div class="text-start md:text-center">
                 <span class="badge {{ $stateBadge }} rounded-full text-[10px] px-2 whitespace-nowrap">{{ $stateLabel }}</span>
             </div>
 

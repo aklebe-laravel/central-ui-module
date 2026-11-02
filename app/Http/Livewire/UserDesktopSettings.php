@@ -117,7 +117,7 @@ class UserDesktopSettings extends BaseComponent
             $this->value = $value;
 
             // Rebuild the desktop (if present on this page). VmDesktop reads the saved
-            // settings again and mounts all cards fresh (see VmDesktop::getCardKey()).
+            // settings again and mounts all cards fresh (see VmDesktopItems::getCardKey()).
             $this->dispatch('vm-desktop:refresh');
         }
     }
