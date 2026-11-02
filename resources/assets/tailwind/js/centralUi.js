@@ -99,6 +99,7 @@ export class CentralUi {
             'proxmox-rrd-updates': '.Modules\\CentralUi\\app\\Events\\ProxmoxApiRrdDataUpdated',
             'proxmox-resource-updates': '.Modules\\CentralUi\\app\\Events\\ProxmoxApiResourceDataUpdated',
             'vm-updates': '.Modules\\CentralUi\\app\\Events\\LocalDesktopUpdated',
+            'proxmox-backup-updates': '.Modules\\CentralUi\\app\\Events\\ProxmoxApiBackupDataUpdated',
         };
         let broadcastBridged = false;
 
@@ -179,6 +180,73 @@ export class CentralUi {
 
                 // Alpine calls destroy() automatically when the element is removed
                 // (cancelled, state changed, card re-rendered without the overlay).
+                destroy() {
+                    if (this.timer) {
+                        clearInterval(this.timer);
+                    }
+                },
+            }));
+
+            /**
+             * Backup bar of the desktop (livewire/backup-overview.blade.php): open or closed.
+             * The choice of the user is remembered in this browser. Without a choice the bar is
+             * open while a backup runs and closed otherwise.
+             */
+            window.Alpine.data('backupBar', (running = false) => ({
+                storageKey: 'central-ui.backup-bar.open',
+                open: running,
+
+                init() {
+                    try {
+                        const stored = window.localStorage.getItem(this.storageKey);
+                        if (stored !== null) {
+                            this.open = (stored === '1');
+                        }
+                    } catch (e) {
+                        // no storage (private mode, blocked): keep the default
+                    }
+                },
+
+                toggle() {
+                    this.open = !this.open;
+                    try {
+                        window.localStorage.setItem(this.storageKey, this.open ? '1' : '0');
+                    } catch (e) {
+                        // ignore, see init()
+                    }
+                },
+            }));
+
+            /**
+             * Relative time to a UNIX timestamp like "in 3 hours", updated every 30 seconds
+             * in the browser (no server request). Language of the page (<html lang>).
+             */
+            window.Alpine.data('relativeTime', (timestamp) => ({
+                text: '',
+                timer: null,
+
+                init() {
+                    const lang = document.documentElement.lang || undefined;
+                    let format = null;
+                    try {
+                        format = new Intl.RelativeTimeFormat(lang, {numeric: 'auto'});
+                    } catch (e) {
+                        format = null;
+                    }
+
+                    const update = () => {
+                        const seconds = Math.round(timestamp - Date.now() / 1000);
+                        const abs = Math.abs(seconds);
+                        const [value, unit] = abs < 60 ? [seconds, 'second']
+                            : abs < 3600 ? [Math.round(seconds / 60), 'minute']
+                                : abs < 86400 ? [Math.round(seconds / 3600), 'hour']
+                                    : [Math.round(seconds / 86400), 'day'];
+                        this.text = format ? format.format(value, unit) : '';
+                    };
+                    update();
+                    this.timer = setInterval(update, 30000);
+                },
+
                 destroy() {
                     if (this.timer) {
                         clearInterval(this.timer);

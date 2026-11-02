@@ -663,6 +663,8 @@ class ProxmoxService extends BaseService
             'cpu_max'        => $vmPayload['maxcpu'] ?? 1,
             'mem_max'        => $vmPayload['maxmem'] ?? 0,
             'mem_used'       => $vmPayload['mem'] ?? 0,
+            // config lock of the guest like 'backup', 'snapshot', 'migrate' (null = not locked)
+            'lock'           => $vmPayload['lock'] ?? null,
         ];
 
         $newHash = hash('xxh64', json_encode($vmNewPayload));

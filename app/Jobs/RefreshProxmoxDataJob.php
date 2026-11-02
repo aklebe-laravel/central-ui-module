@@ -11,8 +11,10 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Queue\SerializesModels;
+use Modules\CentralUi\app\Events\ProxmoxApiBackupDataUpdated;
 use Modules\CentralUi\app\Events\ProxmoxApiResourceDataUpdated;
 use Modules\CentralUi\app\Events\ProxmoxApiRrdDataUpdated;
+use Modules\CentralUi\app\Services\Backup\ProxmoxBackupService;
 use Modules\CentralUi\app\Services\ProxmoxService;
 use Modules\CentralUi\app\Services\SafeBroadcast;
 
@@ -23,10 +25,11 @@ use Modules\CentralUi\app\Services\SafeBroadcast;
  * timeouts up to 5s each). Inside the scheduler tick they blocked everything
  * behind them, including the processing of due shutdown/start actions.
  *
- * Two kinds of work, one class, so they can be serialized (see middleware()):
+ * Three kinds of work, one class, so they can be serialized (see middleware()):
  *   - PartResources: cluster resources + payload rebuild (ProxmoxService::receiveResourcesAndBroadcast)
  *   - PartRrd:       RRD statistics per running VM for one timeframe (ProxmoxService::receiveRrdData),
  *                    one job per key of ProxmoxService::RrdTimeframes
+ *   - PartBackups:   backup jobs and running backups (ProxmoxBackupService::receiveAndCache)
  */
 class RefreshProxmoxDataJob implements ShouldQueue, ShouldBeUnique
 {
@@ -34,6 +37,7 @@ class RefreshProxmoxDataJob implements ShouldQueue, ShouldBeUnique
 
     public const string PartResources = 'resources';
     public const string PartRrd = 'rrd';
+    public const string PartBackups = 'backups';
 
     /**
      * Max runtime of one run (seconds).
@@ -47,7 +51,7 @@ class RefreshProxmoxDataJob implements ShouldQueue, ShouldBeUnique
     public int $uniqueFor = 120;
 
     /**
-     * @param  string  $part       self::PartResources or self::PartRrd
+     * @param  string  $part       self::PartResources, self::PartRrd or self::PartBackups
      * @param  string  $timeframe  PartRrd only: key of ProxmoxService::RrdTimeframes
      */
     public function __construct(protected string $part, protected string $timeframe = 'hour')
@@ -100,6 +104,15 @@ class RefreshProxmoxDataJob implements ShouldQueue, ShouldBeUnique
         if ($this->part === self::PartRrd) {
             $proxmox->receiveRrdData($this->timeframe);
             SafeBroadcast::send(new ProxmoxApiRrdDataUpdated());
+
+            return;
+        }
+
+        if ($this->part === self::PartBackups) {
+            // broadcast only on changes: the backup bar re-renders for every open desktop
+            if (app(ProxmoxBackupService::class)->receiveAndCache()) {
+                SafeBroadcast::send(new ProxmoxApiBackupDataUpdated());
+            }
         }
     }
 }

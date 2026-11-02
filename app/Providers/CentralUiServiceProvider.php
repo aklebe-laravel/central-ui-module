@@ -23,6 +23,7 @@ use Modules\CentralUi\app\Models\Saying;
 use Modules\CentralUi\app\Models\User as ModuleUser;
 use App\Models\User as AppUser;
 use Modules\CentralUi\app\Services\Pfsense\PfsenseApi;
+use Modules\CentralUi\app\Services\Backup\ProxmoxBackupService;
 use Modules\CentralUi\app\Services\ProxmoxService;
 use Modules\CentralUi\app\Services\Wireguard\DatabaseNetworkRepository;
 use Modules\CentralUi\app\Services\Wireguard\NetworkRepository;
@@ -56,6 +57,7 @@ class CentralUiServiceProvider extends ModuleBaseServiceProvider
         parent::register();
 
         $this->app->singleton(ProxmoxService::class);
+        $this->app->singleton(ProxmoxBackupService::class);
         $this->app->register(RouteServiceProvider::class);
         $this->app->register(ScheduleServiceProvider::class);
 

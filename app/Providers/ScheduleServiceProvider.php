@@ -10,6 +10,7 @@ use Modules\CentralUi\app\Jobs\RefreshProxmoxDataJob;
 use Modules\CentralUi\app\Jobs\ShutdownVmJob;
 use Modules\CentralUi\app\Jobs\StartVmJob;
 use Modules\CentralUi\app\Models\ProxtopServerAction;
+use Modules\CentralUi\app\Services\Backup\ProxmoxBackupService;
 use Modules\CentralUi\app\Services\ProxmoxService;
 use Modules\CentralUi\app\Services\SafeBroadcast;
 use Modules\SystemBase\app\Providers\Base\ScheduleBaseServiceProvider;
@@ -48,6 +49,8 @@ class ScheduleServiceProvider extends ScheduleBaseServiceProvider
                 foreach (ProxmoxService::RrdTimeframes as $timeframe => $definition) {
                     $intervals['rrd'][$timeframe] = (int) $config->getValue($definition['config'], $definition['interval'], module: 'central-ui');
                 }
+                $intervals['backups'] = (int) $config->getValue('scheduler.api.backups.interval', 60, module: 'central-ui');
+                $intervals['backups_hot'] = (int) $config->getValue('scheduler.api.backups.interval_hot', 15, module: 'central-ui');
                 $intervals['desktop'] = (int) $config->getValue('scheduler.frontend.desktop.interval', 0, module: 'central-ui');
                 // 'scheduler.api.action.interval' is no longer used: due actions are
                 // checked on EVERY tick now (a cheap indexed query), see step 4.
@@ -70,6 +73,15 @@ class ScheduleServiceProvider extends ScheduleBaseServiceProvider
                 if ($interval > 0 && Cache::add('central-ui.scheduler.rrd.'.$timeframe, $currentTime, $interval)) {
                     RefreshProxmoxDataJob::dispatch(RefreshProxmoxDataJob::PartRrd, $timeframe);
                 }
+            }
+
+            // 3b. Backups (jobs + running vzdump tasks): faster while a backup runs or starts soon.
+            // 'backups.hot' is one small cache key written by the backup job. Same Cache::add() trick as RRD.
+            $backupInterval = app(ProxmoxBackupService::class)->isHotCached() ? $intervals['backups_hot'] : $intervals['backups'];
+            if ($intervals['backups'] > 0 && $backupInterval > 0
+                && Cache::add('central-ui.scheduler.backups', $currentTime, $backupInterval)
+            ) {
+                RefreshProxmoxDataJob::dispatch(RefreshProxmoxDataJob::PartBackups);
             }
 
             // 4. Due database actions (start / shutdown / expiring pending locks).

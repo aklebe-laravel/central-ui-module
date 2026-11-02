@@ -57,6 +57,7 @@ $showDetails = (($density ?? '') !== '');
             {{-- status --}}
             <div class="text-start md:text-center">
                 <span class="badge {{ $stateBadge }} rounded-full text-[10px] px-2 whitespace-nowrap">{{ $stateLabel }}</span>
+                @include('central-ui::partials.backup-badge', ['lock' => $d['lock'] ?? null])
             </div>
 
             @if ($showDetails)
@@ -555,6 +556,7 @@ $showDetails = (($density ?? '') !== '');
                     </div>
                 </div>
                 <div class="text-[10px] mt-2 text-content-muted" wire:key="vm-last-seen-{{$this->observeItemId}}">
+                    @include('central-ui::partials.backup-badge', ['lock' => $this->observeItemData['lock'] ?? null])
                     <div class="inline-block text-[10px] badge badge-muted rounded-full">
                         @if ($this->observeItemData['status_is_running'])
                             <span>{{ __('Online') }} {{ sprintf("%02d:%02d:%02d", $onlineSince->days, $onlineSince->h, $onlineSince->i) }}</span>

@@ -126,12 +126,15 @@ Requirements:
 All Proxmox data comes from queued jobs and is cached. The desktop cards never call the API, they only
 read the cache. Every piece of data has its own key, nothing large is read for a single VM.
 
-| Cache key (prefix `central-ui.proxmox.`) | Written by                        | Read by                    | Size         |
-|------------------------------------------|-----------------------------------|----------------------------|--------------|
-| `server.<serverId>.vms`                  | resource job (`receiveResources`) | resource job, RRD jobs     | small        |
-| `vm.<vmId>.rrd_stats.<timeframe>`        | RRD job of the timeframe          | resource job               | < 1 KB       |
-| `vm.<vmId>.prepared`                     | resource job (payload rebuild)    | desktop cards (`VmStatus`) | a few KB     |
-| `resources`                              | resource job                      | console commands only      | all payloads |
+| Cache key (prefix `central-ui.proxmox.`) | Written by                          | Read by                       | Size         |
+|------------------------------------------|-------------------------------------|-------------------------------|--------------|
+| `server.<serverId>.vms`                  | resource job (`receiveResources`)   | resource job, RRD jobs        | small        |
+| `vm.<vmId>.rrd_stats.<timeframe>`        | RRD job of the timeframe            | resource job                  | < 1 KB       |
+| `vm.<vmId>.prepared`                     | resource job (payload rebuild)      | desktop cards (`VmStatus`)    | a few KB     |
+| `resources`                              | resource job                        | console commands only         | all payloads |
+| `server.<serverId>.backups`              | backup job (`ProxmoxBackupService`) | backup bar (`BackupOverview`) | small        |
+| `backups.task.<md5(upid)>`               | backup job (log state of a task)    | backup job                    | < 1 KB       |
+| `backups.hot`, `backups.hash`            | backup job                          | scheduler, backup job         | tiny         |
 
 `<vmId>` is the database id (`proxtop_server_vms.id`), not the Proxmox VMID.
 The raw RRD history is not cached (`timeframe=day` is ~450 KB per VM), only its statistics.
@@ -161,6 +164,7 @@ card re-renders it:
 | `ProxmoxApiResourceDataUpdated` (`proxmox-resource-updates`) | every card (`VmStatus`) | new payload in `vm.<id>.prepared`                        |
 | `LocalDesktopUpdated` (`vm-updates`)                         | every card (`VmStatus`) | start/shutdown/grace of any user                         |
 | `ProxmoxApiRrdDataUpdated` (`proxmox-rrd-updates`)           | nothing                 | statistics reach the cards with the next resource update |
+| `ProxmoxApiBackupDataUpdated` (`proxmox-backup-updates`)     | backup bar only         | sent only when jobs or running backups changed           |
 
 - The desktop (`VmDesktop`) listens to none of them (its `init()` runs on every request).
 - The pulses on the cards (`partials/update-bubble.blade.php`, Alpine `updateBubble` in `centralUi.js`) show
@@ -189,6 +193,43 @@ php artisan central-ui:fetch                       # fetch everything now and re
 php artisan tinker
 > app(\Modules\CentralUi\app\Services\ProxmoxService::class)->getVmRrdPhases(5)
 > Cache::get('central-ui.proxmox.vm.5.prepared')
+```
+
+## Backups
+
+The desktop shows a bar above the VM cards (`BackupOverview`, hidden when empty): running backups with
+progress and the next scheduled backup jobs. A VM card shows the badge "Backup" while Proxmox holds the
+config lock `backup` of the guest (field `lock` of `cluster/resources`, no extra API call).
+
+Only the Proxmox VE API is used (no Proxmox Backup Server):
+
+| Endpoint                        | Used for                                                                    |
+|---------------------------------|-----------------------------------------------------------------------------|
+| `cluster/backup`                | enabled jobs, `next-run`, guests (`vmid`, `all`, `pool`, `exclude`, `node`) |
+| `cluster/tasks`                 | running `vzdump` tasks (no `endtime`)                                       |
+| `nodes/{node}/tasks/{upid}/log` | progress: current guest, percent (qemu), finished and failed guests         |
+
+The log is read incrementally (`BackupTaskLog`, only new lines per run).
+
+**Permission:** the API token needs `Sys.Audit` on `/` (with privilege separation: on the token itself).
+Without it `cluster/backup` answers 403 (the bar shows an error to admins) and `cluster/tasks` only lists the
+token's own tasks, so running backups of the scheduler (`root@pam`) are missing.
+
+Who sees what:
+
+- `developer`/`admin`: all jobs and guests, job name (comment or id), storage, mode, node, API errors
+- other users: only jobs and backups of the VMs on their own desktop (same filter as the cards)
+
+Intervals (core configs, deployment `0008`): `scheduler.api.backups.interval` (60s) and
+`scheduler.api.backups.interval_hot` (15s, while a backup runs or a job starts within 2 minutes).
+`0` disables the backup bar data. A broadcast is only sent when the data changed.
+
+Debugging:
+
+```
+php artisan tinker
+> app(\Modules\CentralUi\app\Services\Backup\ProxmoxBackupService::class)->receiveAndCache()
+> Cache::get('central-ui.proxmox.server.1.backups')
 ```
 
 ## License

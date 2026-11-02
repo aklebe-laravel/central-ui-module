@@ -12,6 +12,9 @@ use Modules\CentralUi\app\Http\Livewire\VmDesktop;
         {{ __('Live updates are disconnected. The VMs are refreshed every :seconds seconds.', ['seconds' => VmDesktop::LIVE_UPDATE_FALLBACK_SECONDS]) }}
     </div>
 
+    {{-- backup bar: running backups and the next backup jobs (BackupOverview, hidden when empty) --}}
+    <livewire:central-ui::backup-overview wire:key="vm-desktop-backups"/>
+
     {{-- form of the observe items, opened by the name in the list layout and "New Entry" (standard data table/form) --}}
     @livewire('central-ui::form.proxtop-observe-server-item', [
         'relatedLivewireDataTable' => 'central-ui::data-table.vm-desktop-items',

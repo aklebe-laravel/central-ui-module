@@ -67,5 +67,23 @@ return [
                 ],
             ],
         ],
+        '0007' => [
+            [
+                'cmd'     => 'models',
+                'sources' => [
+                    // intervals of the RRD statistics (hour, day)
+                    'core-config.php',
+                ],
+            ],
+        ],
+        '0008' => [
+            [
+                'cmd'     => 'models',
+                'sources' => [
+                    // intervals of the backup bar
+                    'core-config.php',
+                ],
+            ],
+        ],
     ],
 ];
