@@ -19,9 +19,11 @@ use Modules\CentralUi\app\Models\ProxtopServerVm;
  * on an active server and visible by acl, in their fixed order ('position'), searchable, all on one page.
  *
  * Every item is its own VmStatus component (live updates, switch). Layout and details come from VmDesktop
- * (user settings): compact and icons use the cards template (search only, all items), the list layout
- * the standard rows with the full header (filters, rows per page, pagination): name (opens the form),
- * status (VmStatus: stats and switch) and the actions.
+ * (user settings): compact and icons use the cards template (all items), the list layout the standard rows
+ * with rows per page and pagination: name (opens the form), status (VmStatus: stats and switch) and the actions.
+ *
+ * The header is the toolbar of the desktop (HEADER_VIEW_TOOLBAR) in every layout: search, then the elements of
+ * config 'central-ui.desktop_toolbar' (backups, server power, ... modules can add their own).
  *
  * Extends the admin table of the observe items: column views, form link, actions, position
  * and the desktop broadcasts of deleteItem() and updateOrder() are inherited.
@@ -70,18 +72,31 @@ class VmDesktopItems extends ProxtopObserveServerItem
     public string $cardsBodyCss = '';
 
     /**
-     * Set by applyLayout()
+     * The toolbar in every layout, see applyLayout()
      *
      * @var string
      */
-    public string $headerView = self::CARDS_HEADER_VIEW;
+    public string $headerView = self::HEADER_VIEW_TOOLBAR;
 
     public string $footerView = '';
 
     /**
-     * Header of the cards layouts: search only (no rows, no pagination, no counter)
+     * Set by applyLayout(): only the list layout has pages
+     *
+     * @var bool
      */
-    protected const string CARDS_HEADER_VIEW = 'central-ui::data-tables.vm-desktop.header';
+    public bool $headerPagination = false;
+
+    /**
+     * Livewire event: a message for the messages of the desktop (shown above the toolbar), e.g. from a toolbar
+     * element like ServerPower. Params: type ('success', 'error', 'info', 'warning'), message.
+     */
+    public const string EventMessage = 'vm-desktop:message';
+
+    /**
+     * Header elements of the cards layouts besides the toolbar elements (other filters only in the list layout).
+     */
+    protected const array CARDS_HEADER_ELEMENTS = ['search'];
 
     /**
      * Name column opens this form (rendered by VmDesktop)
@@ -136,6 +151,22 @@ class VmDesktopItems extends ProxtopObserveServerItem
     }
 
     /**
+     * See EventMessage.
+     *
+     * @param  string  $type
+     * @param  string  $message
+     *
+     * @return void
+     */
+    #[On(self::EventMessage)]
+    public function showDesktopMessage(string $type = 'info', string $message = ''): void
+    {
+        if ($message !== '') {
+            $this->addMessage($message, in_array($type, ['success', 'error', 'info', 'warning'], true) ? $type : 'info');
+        }
+    }
+
+    /**
      * Runs on every request: the user settings decide layout and details.
      *
      * @return void
@@ -147,6 +178,36 @@ class VmDesktopItems extends ProxtopObserveServerItem
         if ($user = app('website_base_settings')->currentUser()) {
             $this->density = (string) $user->getExtraAttribute('desktop_vm_details', VmDesktop::DETAILS_HIDE);
             $this->layout = VmDesktop::sanitizeLayout($user->getExtraAttribute('desktop_layout', VmDesktop::LAYOUT_COMPACT));
+        }
+    }
+
+    /**
+     * Toolbar elements: config 'central-ui.desktop_toolbar' of this module, merged with
+     * 'combined-module-central-ui.desktop_toolbar' of other modules (their file config/combined-module-central-ui.php).
+     * An entry with 'view' => null removes an element.
+     *
+     * @return array<string, array{view?: ?string, position?: int, css_group?: string}>
+     */
+    public static function toolbarElements(): array
+    {
+        $elements = array_replace_recursive((array) config('central-ui.desktop_toolbar', []),
+            (array) config('combined-module-central-ui.desktop_toolbar', []));
+
+        return array_filter($elements, fn($element) => is_array($element) && !empty($element['view']));
+    }
+
+    /**
+     * Filters of the parent plus the toolbar elements (see toolbarElements()):
+     * name => ['view' => ..., 'position' => ..., 'css_group' => ...]
+     *
+     * @return void
+     */
+    protected function initFilters(): void
+    {
+        parent::initFilters();
+
+        foreach (self::toolbarElements() as $name => $element) {
+            $this->addHeaderElement((string) $name, (string) $element['view'], (int) ($element['position'] ?? 5000), (string) ($element['css_group'] ?? ''));
         }
     }
 
@@ -280,21 +341,36 @@ class VmDesktopItems extends ProxtopObserveServerItem
     }
 
     /**
-     * Template and grid of the current layout (former vm-desktop.blade.php).
+     * Template and grid of the current layout (former vm-desktop.blade.php) and the toolbar elements for it.
      *
      * @return void
      */
     protected function applyLayout(): void
     {
-        $this->headerView = self::CARDS_HEADER_VIEW;
-        $this->footerView = '';
+        $isList = $this->isListLayout();
+
+        $this->headerView = self::HEADER_VIEW_TOOLBAR;
+        $this->headerPagination = $isList;
+        $this->footerView = $isList ? 'data-table::livewire.js-dt.tables.footers.default' : '';
+
+        // search grows, its settings menu (new entry, export, ...) only in the list layout
+        $this->setDefaultFilter('search.view',
+            $isList ? 'data-table::livewire.js-dt.filters.default-elements.search-and-settings' : 'data-table::livewire.js-dt.filters.default-elements.text');
+        $this->setDefaultFilter('search.css_group', 'flex-1 min-w-48 max-w-md');
+
+        // the other filters (rows per page, ...) only in the list layout, the toolbar elements always
+        $toolbarElements = array_keys(self::toolbarElements());
+        foreach (array_keys($this->filterElementConfig) as $name) {
+            if (in_array($name, self::CARDS_HEADER_ELEMENTS, true) || in_array($name, $toolbarElements, true)) {
+                continue;
+            }
+            $this->setDefaultFilter($name.'.css_group', $isList ? 'w-28' : 'hidden');
+        }
 
         switch ($this->layout) {
             case VmDesktop::LAYOUT_LIST:
-                // standard rows with the full header, one row per VM (see getColumns())
+                // standard rows, one row per VM (see getColumns())
                 $this->tableView = self::TABLE_VIEW_ROWS;
-                $this->headerView = 'data-table::livewire.js-dt.tables.headers.default';
-                $this->footerView = 'data-table::livewire.js-dt.tables.footers.default';
 
                 return;
 

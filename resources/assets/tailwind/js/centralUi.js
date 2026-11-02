@@ -99,7 +99,6 @@ export class CentralUi {
             'proxmox-rrd-updates': '.Modules\\CentralUi\\app\\Events\\ProxmoxApiRrdDataUpdated',
             'proxmox-resource-updates': '.Modules\\CentralUi\\app\\Events\\ProxmoxApiResourceDataUpdated',
             'vm-updates': '.Modules\\CentralUi\\app\\Events\\LocalDesktopUpdated',
-            'proxmox-backup-updates': '.Modules\\CentralUi\\app\\Events\\ProxmoxApiBackupDataUpdated',
         };
         let broadcastBridged = false;
 
@@ -188,31 +187,45 @@ export class CentralUi {
             }));
 
             /**
-             * Backup bar of the desktop (livewire/backup-overview.blade.php): open or closed.
-             * The choice of the user is remembered in this browser. Without a choice the bar is
-             * open while a backup runs and closed otherwise.
+             * Signal bubble of the backup chip (partials/backup-signal.blade.php). The state depends on the time
+             * alone ("starts in 2 hours", "failed within 6 hours"), so it is calculated here every 15 seconds,
+             * without a server request. First match wins:
+             *   running   a backup runs                         orange, pulsing
+             *   imminent  a job starts within windows.imminent  yellow, pulsing
+             *   soon      a job starts within windows.soon      light yellow
+             *   failed    a backup failed within windows.result red
+             *   ok        a backup succeeded within windows.result green
+             *   idle      everything else                       blue
+             *
+             * facts:   BackupOverview::emptySignal() (UNIX timestamps or null)
+             * windows: BackupOverview::SignalWindows
              */
-            window.Alpine.data('backupBar', (running = false) => ({
-                storageKey: 'central-ui.backup-bar.open',
-                open: running,
+            window.Alpine.data('backupSignal', (facts, windows) => ({
+                state: 'idle',
+                timer: null,
 
                 init() {
-                    try {
-                        const stored = window.localStorage.getItem(this.storageKey);
-                        if (stored !== null) {
-                            this.open = (stored === '1');
-                        }
-                    } catch (e) {
-                        // no storage (private mode, blocked): keep the default
-                    }
+                    this.update();
+                    this.timer = setInterval(() => this.update(), 15000);
                 },
 
-                toggle() {
-                    this.open = !this.open;
-                    try {
-                        window.localStorage.setItem(this.storageKey, this.open ? '1' : '0');
-                    } catch (e) {
-                        // ignore, see init()
+                update() {
+                    const now = Date.now() / 1000;
+                    const nextIn = (facts.next_run ?? null) !== null ? facts.next_run - now : null;
+                    const within = (at, seconds) => (at ?? null) !== null && now - at <= seconds;
+
+                    // a job whose start time just passed counts as imminent until the next update shows it running
+                    this.state = facts.running ? 'running'
+                        : (nextIn !== null && nextIn <= windows.imminent) ? 'imminent'
+                            : (nextIn !== null && nextIn <= windows.soon) ? 'soon'
+                                : within(facts.last_failed_at, windows.result) ? 'failed'
+                                    : within(facts.last_ok_at, windows.result) ? 'ok'
+                                        : 'idle';
+                },
+
+                destroy() {
+                    if (this.timer) {
+                        clearInterval(this.timer);
                     }
                 },
             }));

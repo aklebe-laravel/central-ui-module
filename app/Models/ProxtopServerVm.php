@@ -5,6 +5,9 @@ namespace Modules\CentralUi\app\Models;
 
 use Carbon\Carbon;
 use Cron\CronExpression;
+use DateTimeImmutable;
+use DateTimeInterface;
+use DateTimeZone;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -112,18 +115,24 @@ class ProxtopServerVm extends Model
     }
 
     /**
-     * Calculates the timing for all attached property schedules strictly in UTC.
+     * Calculates the timing for all attached property schedules.
+     * The schedules (cron, start and end date) are local times of the installation
+     * (config 'website-base.timezone', env APP_DISPLAY_TIMEZONE), the results are seconds and do not depend on it.
      * Values:
      * 0: currently in time (can start/end now)
      * > 0: seconds to become true (can start/end in x seconds)
      *
+     * @param  Carbon|null  $now
+     * @param  string|null  $timezone  time zone of the schedules, default: the installation
+     *
      * @return array<string, array{starts_in: ?int, ends_in: ?int}>
      */
-    public function getTemplatesNextScheduleWindows(?Carbon $now = null): array
+    public function getTemplatesNextScheduleWindows(?Carbon $now = null, ?string $timezone = null): array
     {
         if ($now === null) {
             $now = Carbon::now('UTC');
         }
+        $timezone ??= app('website_base_settings')->installationTimezone();
 
         $results = [
             'can_online'     => ['starts_in' => null, 'ends_in' => null],
@@ -150,7 +159,12 @@ class ProxtopServerVm extends Model
                     continue;
                 }
 
-                $timing = $this->calculateTiming($schedule, $now);
+                $timing = self::scheduleTiming($schedule->cron_expression,
+                    (int) $schedule->duration,
+                    $schedule->starts_at_date?->toDateString(),
+                    $schedule->ends_at_date?->toDateString(),
+                    $now,
+                    $timezone);
 
                 if ($timing) {
                     if ($results[$key]['starts_in'] === null || $timing['starts_in'] < $results[$key]['starts_in']) {
@@ -266,61 +280,57 @@ class ProxtopServerVm extends Model
     }
 
     /**
-     * Core calculation logic strictly enforcing UTC.
+     * Timing of one schedule. The cron expression and the dates are local times of $timezone (DST included:
+     * "0 8 * * *" in Europe/Berlin is 07:00 UTC in winter and 06:00 UTC in summer), the result are seconds.
+     * No database, no config (testable).
+     *
+     * @param  string|null        $cronExpression  null/empty: always (the dates only)
+     * @param  int                $duration        seconds the window is open after each cron run
+     * @param  string|null        $startsAtDate    'Y-m-d', first local day (from 00:00)
+     * @param  string|null        $endsAtDate      'Y-m-d', last local day (until 23:59:59)
+     * @param  DateTimeInterface  $now
+     * @param  string             $timezone        e.g. 'Europe/Berlin'
+     *
+     * @return array{starts_in: int, ends_in: int}|null  null = no more window (after the end date)
+     * @throws \Exception
      */
-    private function calculateTiming(ProxtopPropertyTemplateSchedule $schedule, Carbon $now): ?array
+    public static function scheduleTiming(?string $cronExpression, int $duration, ?string $startsAtDate, ?string $endsAtDate, DateTimeInterface $now, string $timezone): ?array
     {
-        // Ensure now is UTC (double safety)
-        $now = $now->copy()
-            ->utc();
+        $zone = new DateTimeZone($timezone);
+        $nowLocal = DateTimeImmutable::createFromInterface($now)
+            ->setTimezone($zone);
+        $nowTs = $nowLocal->getTimestamp();
 
-        if ($schedule->starts_at_date
-            && $now->isBefore($schedule->starts_at_date->startOfDay()
-                ->utc())
-        ) {
-            return [
-                'starts_in' => (int) $now->diffInSeconds($schedule->starts_at_date->startOfDay()
-                    ->utc()),
-                'ends_in'   => 0,
-            ];
+        if ($startsAtDate) {
+            $startsAt = new DateTimeImmutable($startsAtDate.' 00:00:00', $zone);
+            if ($nowTs < $startsAt->getTimestamp()) {
+                return ['starts_in' => $startsAt->getTimestamp() - $nowTs, 'ends_in' => 0];
+            }
         }
 
-        if ($schedule->ends_at_date
-            && $now->isAfter($schedule->ends_at_date->endOfDay()
-                ->utc())
-        ) {
+        if ($endsAtDate && $nowTs > (new DateTimeImmutable($endsAtDate.' 23:59:59', $zone))->getTimestamp()) {
             return null;
         }
 
-        if (empty($schedule->cron_expression)) {
+        if (empty($cronExpression)) {
             return ['starts_in' => 0, 'ends_in' => 31536000];
         }
 
-        // CronExpression defaults to UTC if no timezone is passed, matching our 'now'
-        $cron = new CronExpression($schedule->cron_expression);
-
-        // Get dates and cast to UTC immediately
-        $lastRun = Carbon::instance($cron->getPreviousRunDate($now, 0, true))
-            ->utc();
-        $nextRun = Carbon::instance($cron->getNextRunDate($now, 0, true))
-            ->utc();
-
-        $windowEndsAt = $lastRun->copy()
-            ->addSeconds($schedule->duration);
+        // the cron runs in local time, so its hours follow the daylight saving time of the zone
+        $cron = new CronExpression($cronExpression);
+        $lastRun = $cron->getPreviousRunDate($nowLocal, 0, true, $timezone)
+            ->getTimestamp();
+        $nextRun = $cron->getNextRunDate($nowLocal, 0, true, $timezone)
+            ->getTimestamp();
+        $windowEndsAt = $lastRun + $duration;
 
         // Scenario A: Currently within the window
-        if ($now->lessThanOrEqualTo($windowEndsAt)) {
-            return [
-                'starts_in' => 0,
-                'ends_in'   => (int) $now->diffInSeconds($windowEndsAt),
-            ];
+        if ($nowTs <= $windowEndsAt) {
+            return ['starts_in' => 0, 'ends_in' => $windowEndsAt - $nowTs];
         }
 
         // Scenario B: Waiting for next occurrence
-        return [
-            'starts_in' => (int) $now->diffInSeconds($nextRun),
-            'ends_in'   => 0,
-        ];
+        return ['starts_in' => $nextRun - $nowTs, 'ends_in' => 0];
     }
 
     /**

@@ -1,5 +1,9 @@
 {
     "Saying": "Saying",
     "Sayings": "Sayings",
+    "ask_shutdown_server": "Shut down the whole server? All VMs and Proxtop itself go off. The power service of the server takes over (e.g. with a grace period and a notification, where it can be extended or stopped).",
+    "ask_shutdown_server_backup": "Attention: a backup runs or starts soon and would be aborted. Shut down the whole server anyway? The power service of the server takes over (e.g. with a grace period and a notification).",
+    "ask_shutdown_server_proxmox": "Shut down the whole server now? Proxmox shuts down all VMs first, then the server. Proxtop itself goes off too. There is no grace period.",
+    "ask_shutdown_server_proxmox_backup": "Attention: a backup runs or starts soon and would be aborted. Shut down the whole server now anyway? There is no grace period.",
     "zzz": "zzz"
 }

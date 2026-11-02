@@ -15,7 +15,8 @@ use Modules\CentralUi\app\Services\Backup\ProxmoxBackupService;
 use Modules\SystemBase\app\Http\Livewire\BaseComponent;
 
 /**
- * Backup bar above the VM cards of the desktop: running backups (progress) and the next backup jobs.
+ * Backup bar above the VM cards of the desktop: running backups (progress), the next backup jobs with the
+ * last result of their guests, and the guests whose last backup failed.
  *
  * Reads the cache only (ProxmoxBackupService), never the API.
  * - developer/admin: all jobs and guests, plus the job name, storage and API errors
@@ -28,6 +29,17 @@ class BackupOverview extends BaseComponent
      * Max upcoming jobs in the bar.
      */
     public const int MaxUpcoming = 5;
+
+    /**
+     * Time windows of the signal bubble in seconds (see backupSignal in centralUi.js):
+     * a job starts within 15 minutes (yellow, pulsing) or 2 hours (light yellow),
+     * the last backup failed or succeeded within 6 hours (red, green).
+     */
+    public const array SignalWindows = [
+        'imminent' => 900,
+        'soon'     => 7200,
+        'result'   => 21600,
+    ];
 
     /**
      * Max guest names per entry (the rest is counted: "+3").
@@ -57,11 +69,11 @@ class BackupOverview extends BaseComponent
     }
 
     /**
-     * @return array{running: array, upcoming: array, errors: array, is_admin: bool}
+     * @return array{running: array, upcoming: array, failed: array, errors: array, signal: array, is_admin: bool}
      */
     protected function loadOverview(): array
     {
-        $empty = ['running' => [], 'upcoming' => [], 'errors' => [], 'is_admin' => false];
+        $empty = ['running' => [], 'upcoming' => [], 'failed' => [], 'errors' => [], 'signal' => self::emptySignal(), 'is_admin' => false];
         if (!($user = app('website_base_settings')->currentUser())) {
             return $empty;
         }
@@ -128,13 +140,15 @@ class BackupOverview extends BaseComponent
      * @param  bool                      $isAdmin
      * @param  int                       $now
      *
-     * @return array{running: array, upcoming: array, errors: array, is_admin: bool}
+     * @return array{running: array, upcoming: array, failed: array, errors: array, signal: array, is_admin: bool}
      */
     public static function buildOverview(array $serverData, array $hosts, array $names, ?array $allowed, bool $isAdmin, int $now): array
     {
         $running = [];
         $upcoming = [];
+        $failed = [];
         $errors = [];
+        $signal = self::emptySignal();
 
         foreach ($serverData as $serverId => $data) {
             if ($isAdmin && $data && !($data['ok'] ?? true)) {
@@ -147,6 +161,27 @@ class BackupOverview extends BaseComponent
             $name = function (int $vmid) use ($serverId, $names): string {
                 return ($names[$serverId.':'.$vmid] ?? '') ?: sprintf('VM %d', $vmid);
             };
+
+            $results = $data['results'] ?? [];
+
+            // guests whose last backup failed (until a later backup succeeds)
+            foreach ($results as $vmid => $entry) {
+                if (!$visible((int) $vmid)) {
+                    continue;
+                }
+                // newest success and newest failure of the visible guests (signal of the bubble)
+                $signalKey = ($entry['ok'] ?? false) ? 'last_ok_at' : 'last_failed_at';
+                $signal[$signalKey] = max($signal[$signalKey] ?? 0, (int) ($entry['at'] ?? 0)) ?: null;
+
+                if (!($entry['ok'] ?? true)) {
+                    $failed[] = [
+                        'key'    => $serverId.'-'.$vmid,
+                        'name'   => $name((int) $vmid),
+                        'reason' => (string) ($entry['reason'] ?? ''),
+                        'at'     => (int) ($entry['at'] ?? 0),
+                    ];
+                }
+            }
 
             foreach ($data['running'] ?? [] as $task) {
                 $vmids = array_values(array_filter($task['vmids'] ?? [], $visible));
@@ -187,8 +222,24 @@ class BackupOverview extends BaseComponent
                     continue;
                 }
 
+                // last result of the job = latest result of each of its guests
+                $last = ['ok' => 0, 'failed' => [], 'unknown' => 0, 'at' => null];
+                foreach ($vmids as $vmid) {
+                    if (!($entry = $results[$vmid] ?? null)) {
+                        $last['unknown']++;
+                        continue;
+                    }
+                    if ($entry['ok'] ?? false) {
+                        $last['ok']++;
+                    } else {
+                        $last['failed'][] = $name($vmid).((($entry['reason'] ?? '') !== '') ? ': '.$entry['reason'] : '');
+                    }
+                    $last['at'] = max($last['at'] ?? 0, (int) ($entry['at'] ?? 0));
+                }
+
                 $upcoming[] = [
                     'key'      => $serverId.'-'.($job['id'] ?? ''),
+                    'last'     => $last,
                     'next_run' => (int) $job['next_run'],
                     'label'    => $isAdmin ? (($job['comment'] ?? '') ?: ($job['id'] ?? '')) : '',
                     'names'    => array_map($name, array_slice($vmids, 0, self::MaxNames)),
@@ -204,12 +255,30 @@ class BackupOverview extends BaseComponent
 
         usort($running, fn(array $a, array $b) => $a['started_at'] <=> $b['started_at']);
         usort($upcoming, fn(array $a, array $b) => $a['next_run'] <=> $b['next_run']);
+        // newest failure first
+        usort($failed, fn(array $a, array $b) => $b['at'] <=> $a['at']);
+
+        $signal['running'] = (bool) $running;
+        $signal['next_run'] = $upcoming[0]['next_run'] ?? null;
 
         return [
             'running'  => $running,
             'upcoming' => array_slice($upcoming, 0, self::MaxUpcoming),
+            'failed'   => $failed,
             'errors'   => $errors,
+            'signal'   => $signal,
             'is_admin' => $isAdmin,
         ];
+    }
+
+    /**
+     * Facts for the signal bubble of the bar. The color is decided in the browser (backupSignal in centralUi.js),
+     * because it changes with the time alone ("in 2 hours", "within 6 hours") without new data.
+     *
+     * @return array{running: bool, next_run: ?int, last_ok_at: ?int, last_failed_at: ?int}
+     */
+    public static function emptySignal(): array
+    {
+        return ['running' => false, 'next_run' => null, 'last_ok_at' => null, 'last_failed_at' => null];
     }
 }

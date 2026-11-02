@@ -22,7 +22,7 @@ namespace Modules\CentralUi\app\Services\Backup;
 final class BackupTaskLog
 {
     /**
-     * @return array{offset: int, selection: array{vmids: int[], all: bool, pool: ?string, exclude: int[]}|null, finished: int[], failed: int[], current: ?int, percent: ?int}
+     * @return array{offset: int, selection: array{vmids: int[], all: bool, pool: ?string, exclude: int[]}|null, finished: int[], failed: int[], reasons: array<int, string>, current: ?int, percent: ?int}
      */
     public static function emptyState(): array
     {
@@ -33,6 +33,8 @@ final class BackupTaskLog
             'selection' => null,
             'finished'  => [],
             'failed'    => [],
+            // vmid => error message of a failed guest ("unable to open file")
+            'reasons'   => [],
             // guest that is backed up right now
             'current'   => null,
             // progress of 'current' in percent, null = unknown (lxc, or no progress line yet)
@@ -80,8 +82,9 @@ final class BackupTaskLog
                 continue;
             }
 
-            if (preg_match('/Backup of VM (\d+) failed/', $text, $m)) {
+            if (preg_match('/Backup of VM (\d+) failed(?: - (.*))?$/', $text, $m)) {
                 $state = self::endGuest($state, (int) $m[1], 'failed');
+                $state['reasons'][(int) $m[1]] = trim($m[2] ?? '');
                 continue;
             }
 

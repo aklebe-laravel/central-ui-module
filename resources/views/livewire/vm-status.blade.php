@@ -565,8 +565,8 @@ $showDetails = (($density ?? '') !== '');
                                                    componentView="components.popup.stats-details"
                                                    :customData="[
                     __('In Days:') => number_format($uptimeInterval->totalDays, 1),
-                    __('Started Date:') => Carbon::createFromTimestamp(time() - $this->observeItemData['uptime'])->toFormattedDayDateString(),
-                    __('Started Time:') => Carbon::createFromTimestamp(time() - $this->observeItemData['uptime'])->toTimeString(),
+                    __('Started Date:') => app('website_base_settings')->toDisplayTime(time() - (int) $this->observeItemData['uptime'])->toFormattedDayDateString(),
+                    __('Started Time:') => app('website_base_settings')->toDisplayTime(time() - (int) $this->observeItemData['uptime'])->toTimeString(),
                 ]"/>
                         @else
                             <span>{{ __('last seen: :time', ['time' => 0]) }}</span>

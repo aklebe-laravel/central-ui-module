@@ -13,14 +13,19 @@ use Modules\CentralUi\app\Services\ProxmoxService;
  * Only the Proxmox VE API, no Proxmox Backup Server:
  *   GET cluster/backup                       backup jobs incl. 'next-run' (UNIX time)
  *   GET cluster/tasks                        recent tasks of the cluster, running = no 'endtime'
- *   GET nodes/{node}/tasks/{upid}/log        log of a running vzdump task, read incrementally (BackupTaskLog)
+ *   GET nodes/{node}/tasks/{upid}/log        log of a vzdump task, read incrementally (BackupTaskLog)
+ *
+ * Last result per guest: every finished vzdump task of cluster/tasks is read once (the rest of its log),
+ * its finished and failed guests are stored (see applyFinishedTask()). A job is not linked to its tasks
+ * by the API, so the result of a job is the latest result of each of its guests (BackupOverview).
  *
  * The API token needs 'Sys.Audit' on '/': without it cluster/backup answers 403 (shown as error to admins)
  * and cluster/tasks only lists the token's own tasks (the jobs run as root@pam, so no running backups).
  *
  * Written by RefreshProxmoxDataJob (part 'backups'), read by the desktop (BackupOverview). Cache keys
  * (prefix 'central-ui.proxmox.'):
- *   server.<serverId>.backups     jobs + running tasks of a server (see receiveServer())
+ *   server.<serverId>.backups     jobs + running tasks + last results of a server (see receiveServer())
+ *   server.<serverId>.backup_results  last result per guest and the processed tasks (kept forever)
  *   backups.task.<md5(upid)>      log state of a running task (BackupTaskLog), expires after a day
  *   backups.hot                   true while a backup runs or one starts soon (scheduler refreshes faster)
  *   backups.hash                  hash of all server data, a broadcast is only sent when it changed
@@ -42,6 +47,16 @@ class ProxmoxBackupService
      * Log states of finished tasks are not deleted, they expire.
      */
     public const int TaskStateTtlSeconds = 86400;
+
+    /**
+     * Finished tasks read per server and run (the first run may find many, they are read over several runs).
+     */
+    public const int FinishedTasksPerRun = 5;
+
+    /**
+     * Processed tasks are remembered this long (cluster/tasks only lists recent tasks).
+     */
+    public const int ProcessedTasksKeepSeconds = 30 * 86400;
 
     /**
      * Guest types of cluster/resources.
@@ -113,11 +128,12 @@ class ProxmoxBackupService
     /**
      * @param  ProxtopServer  $server
      *
-     * @return array{ok: bool, error: ?string, fetched_at: int, jobs: array, running: array}
+     * @return array{ok: bool, error: ?string, fetched_at: int, jobs: array, running: array, results: array}
      */
     public function receiveServer(ProxtopServer $server): array
     {
-        $result = ['ok' => true, 'error' => null, 'fetched_at' => time(), 'jobs' => [], 'running' => []];
+        $result = ['ok' => true, 'error' => null, 'fetched_at' => time(), 'jobs' => [], 'running' => [], 'results' => []];
+        $store = $this->getResultsStore((int) $server->getKey());
 
         // the guests of the server (cluster/resources, fetched by the resource job every 30s)
         $resources = $this->proxmox->getServerVms((int) $server->getKey());
@@ -141,12 +157,33 @@ class ProxmoxBackupService
             $result['ok'] = false;
             $result['error'] ??= 'cluster/tasks';
         } else {
+            $finished = [];
             foreach ($tasksJson['data'] as $task) {
-                if (self::isRunningBackupTask((array) $task)) {
-                    $result['running'][] = $this->buildRunningTask($server, (array) $task, $resources);
+                $task = (array) $task;
+                if (self::isRunningBackupTask($task)) {
+                    $result['running'][] = $this->buildRunningTask($server, $task, $resources);
+                } elseif (self::isFinishedBackupTask($task) && !isset($store['processed'][md5((string) $task['upid'])])) {
+                    $finished[] = $task;
                 }
             }
+
+            // oldest first: a newer result of a guest overwrites an older one
+            usort($finished, fn(array $a, array $b) => (int) $a['endtime'] <=> (int) $b['endtime']);
+            foreach (array_slice($finished, 0, self::FinishedTasksPerRun) as $task) {
+                $state = $this->refreshTaskState($server, $task);
+                // log not completely read (very long or not reachable): try again next run
+                if (!($state['eof'] ?? false)) {
+                    continue;
+                }
+                $store['vms'] = self::applyFinishedTask($store['vms'], $task, $state, $resources);
+                $store['processed'][md5((string) $task['upid'])] = (int) $task['endtime'];
+            }
+
+            $store['processed'] = array_filter($store['processed'], fn(int $endtime) => $endtime >= time() - self::ProcessedTasksKeepSeconds);
+            Cache::forever($this->cacheKeyResults((int) $server->getKey()), $store);
         }
+
+        $result['results'] = $store['vms'];
 
         return $result;
     }
@@ -238,6 +275,90 @@ class ProxmoxBackupService
     }
 
     /**
+     * @param  array  $task  item of cluster/tasks
+     *
+     * @return bool
+     */
+    public static function isFinishedBackupTask(array $task): bool
+    {
+        return ($task['type'] ?? null) === 'vzdump'
+               && isset($task['endtime'])
+               && !empty($task['upid'])
+               && !empty($task['node']);
+    }
+
+    /**
+     * Stores the result of a finished task per guest. Only newer results replace older ones.
+     *
+     * - "Finished Backup of VM x": ok
+     * - "Backup of VM x failed - reason": failed with the reason
+     * - task failed before any guest (status not OK, no guest finished or failed, like an unreachable
+     *   storage): all guests of the task failed with the task status as reason
+     *
+     * @param  array<int, array{ok: bool, at: int, reason: ?string}>  $vms        last result per guest
+     * @param  array                                                  $task       item of cluster/tasks
+     * @param  array                                                  $state      BackupTaskLog state of the whole log
+     * @param  array                                                  $resources  cluster/resources
+     *
+     * @return array<int, array{ok: bool, at: int, reason: ?string}>
+     */
+    public static function applyFinishedTask(array $vms, array $task, array $state, array $resources): array
+    {
+        $at = (int) ($task['endtime'] ?? 0);
+        $status = (string) ($task['status'] ?? '');
+
+        $results = [];
+        foreach ($state['finished'] ?? [] as $vmid) {
+            $results[(int) $vmid] = ['ok' => true, 'at' => $at, 'reason' => null];
+        }
+        foreach ($state['failed'] ?? [] as $vmid) {
+            $results[(int) $vmid] = ['ok' => false, 'at' => $at, 'reason' => ($state['reasons'][$vmid] ?? '') ?: $status];
+        }
+
+        if (!$results && $status !== 'OK') {
+            $selection = $state['selection'] ?? ['vmids' => BackupTaskLog::parseIdList((string) ($task['id'] ?? '')), 'all' => false, 'pool' => null, 'exclude' => []];
+            foreach (self::resolveGuests($selection, $resources, (string) ($task['node'] ?? '')) as $vmid) {
+                $results[$vmid] = ['ok' => false, 'at' => $at, 'reason' => $status ?: null];
+            }
+        }
+
+        foreach ($results as $vmid => $entry) {
+            if (!isset($vms[$vmid]) || $vms[$vmid]['at'] <= $entry['at']) {
+                $vms[$vmid] = $entry;
+            }
+        }
+        ksort($vms);
+
+        return $vms;
+    }
+
+    /**
+     * Backups that make a shutdown of the server risky: one runs, or a job starts within $windowSeconds.
+     * Used by the confirmation of the server power button (ServerPower).
+     *
+     * @param  array<int, array>  $serversData  server id => receiveServer()
+     * @param  int                $now
+     * @param  int                $windowSeconds
+     *
+     * @return array{running: bool, next_run: ?int}  next_run: earliest job start within the window
+     */
+    public static function shutdownRisk(array $serversData, int $now, int $windowSeconds): array
+    {
+        $risk = ['running' => false, 'next_run' => null];
+        foreach ($serversData as $data) {
+            $risk['running'] = $risk['running'] || !empty($data['running']);
+            foreach ($data['jobs'] ?? [] as $job) {
+                $nextRun = $job['next_run'] ?? null;
+                if ($nextRun !== null && $nextRun <= $now + $windowSeconds) {
+                    $risk['next_run'] = min($risk['next_run'] ?? PHP_INT_MAX, (int) $nextRun);
+                }
+            }
+        }
+
+        return $risk;
+    }
+
+    /**
      * True while a backup runs or a job starts within HotBeforeSeconds (also a job whose start was missed
      * by a few seconds, until the next fetch sees its task).
      *
@@ -301,7 +422,7 @@ class ProxmoxBackupService
      * @param  ProxtopServer  $server
      * @param  array          $task
      *
-     * @return array state of BackupTaskLog
+     * @return array state of BackupTaskLog, plus 'eof' = the end of the log was reached in this call
      */
     protected function refreshTaskState(ProxtopServer $server, array $task): array
     {
@@ -309,14 +430,20 @@ class ProxmoxBackupService
         $state = Cache::get($key) ?? BackupTaskLog::emptyState();
 
         $uri = sprintf('nodes/%s/tasks/%s/log', rawurlencode((string) $task['node']), rawurlencode((string) $task['upid']));
+        $state['eof'] = false;
         for ($i = 0; $i < self::LogRequestsPerRun; $i++) {
             // 'start' is 0-based, the line numbers 'n' start at 1: start = number of lines already read
             $json = json_decode($this->proxmox->send($server, $uri, queryParams: [
                 'start' => $state['offset'],
                 'limit' => self::LogLinesPerRequest,
             ]), true);
-            $lines = is_array($json) ? ($json['data'] ?? []) : [];
+            if (!is_array($json) || !isset($json['data'])) {
+                // log not reachable: eof stays false
+                break;
+            }
+            $lines = $json['data'];
             if (!$lines) {
+                $state['eof'] = true;
                 break;
             }
 
@@ -325,6 +452,7 @@ class ProxmoxBackupService
 
             // end of the log, or no progress (protects against an endless loop)
             if (count($lines) < self::LogLinesPerRequest || $state['offset'] === $offsetBefore) {
+                $state['eof'] = true;
                 break;
             }
         }
@@ -332,6 +460,26 @@ class ProxmoxBackupService
         Cache::put($key, $state, self::TaskStateTtlSeconds);
 
         return $state;
+    }
+
+    /**
+     * @param  int  $serverId
+     *
+     * @return array{vms: array, processed: array<string, int>}
+     */
+    protected function getResultsStore(int $serverId): array
+    {
+        return (Cache::get($this->cacheKeyResults($serverId)) ?? []) + ['vms' => [], 'processed' => []];
+    }
+
+    /**
+     * @param  int  $serverId
+     *
+     * @return string
+     */
+    protected function cacheKeyResults(int $serverId): string
+    {
+        return $this->proxmox->buildCacheKey('server', $serverId, 'backup_results');
     }
 
     /**

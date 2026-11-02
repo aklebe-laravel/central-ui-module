@@ -133,6 +133,7 @@ read the cache. Every piece of data has its own key, nothing large is read for a
 | `vm.<vmId>.prepared`                     | resource job (payload rebuild)      | desktop cards (`VmStatus`)    | a few KB     |
 | `resources`                              | resource job                        | console commands only         | all payloads |
 | `server.<serverId>.backups`              | backup job (`ProxmoxBackupService`) | backup bar (`BackupOverview`) | small        |
+| `server.<serverId>.backup_results`       | backup job (last result per guest)  | backup job                    | small        |
 | `backups.task.<md5(upid)>`               | backup job (log state of a task)    | backup job                    | < 1 KB       |
 | `backups.hot`, `backups.hash`            | backup job                          | scheduler, backup job         | tiny         |
 
@@ -197,8 +198,8 @@ php artisan tinker
 
 ## Backups
 
-The desktop shows a bar above the VM cards (`BackupOverview`, hidden when empty): running backups with
-progress and the next scheduled backup jobs. A VM card shows the badge "Backup" while Proxmox holds the
+The desktop toolbar shows a backup chip (`BackupOverview`, hidden when empty), its popover lists running backups
+with progress, failed backups and the next scheduled backup jobs. A VM card shows the badge "Backup" while Proxmox holds the
 config lock `backup` of the guest (field `lock` of `cluster/resources`, no extra API call).
 
 Only the Proxmox VE API is used (no Proxmox Backup Server):
@@ -206,10 +207,20 @@ Only the Proxmox VE API is used (no Proxmox Backup Server):
 | Endpoint                        | Used for                                                                    |
 |---------------------------------|-----------------------------------------------------------------------------|
 | `cluster/backup`                | enabled jobs, `next-run`, guests (`vmid`, `all`, `pool`, `exclude`, `node`) |
-| `cluster/tasks`                 | running `vzdump` tasks (no `endtime`)                                       |
+| `cluster/tasks`                 | running `vzdump` tasks (no `endtime`) and finished ones (last results)      |
 | `nodes/{node}/tasks/{upid}/log` | progress: current guest, percent (qemu), finished and failed guests         |
 
 The log is read incrementally (`BackupTaskLog`, only new lines per run).
+
+**Last results:** every finished `vzdump` task is read once (at most 5 per server and run) and gives the last
+result per guest: ok, or failed with the reason of the log line `Backup of VM x failed - <reason>`. If a task
+fails before any guest (storage not reachable), all its guests fail with the task status. The API does not link
+a task to its job, so the result of a job is the latest result of each of its guests ("Last: OK",
+"Last: 1 of 3 failed"). A failed guest stays in the list "Last backup failed" until a later backup succeeds.
+
+The bubble of the chip shows the state by color (calculated in the browser every 15s, `backupSignal` in
+`centralUi.js`, windows in `BackupOverview::SignalWindows`), first match wins: backup running (orange, pulsing),
+job within 15 minutes (yellow, pulsing), job within 2 hours (light yellow), last backup failed within 6 hours (red), last backup succeeded within 6 hours (green), otherwise blue.
 
 **Permission:** the API token needs `Sys.Audit` on `/` (with privilege separation: on the token itself).
 Without it `cluster/backup` answers 403 (the bar shows an error to admins) and `cluster/tasks` only lists the
@@ -231,6 +242,85 @@ php artisan tinker
 > app(\Modules\CentralUi\app\Services\Backup\ProxmoxBackupService::class)->receiveAndCache()
 > Cache::get('central-ui.proxmox.server.1.backups')
 ```
+
+## Desktop toolbar
+
+The header of the cards (`VmDesktopItems`) is a toolbar in every layout (`BaseDataTable::HEADER_VIEW_TOOLBAR` of
+the DataTable module): search, then the elements of config `central-ui.desktop_toolbar` (backups, server power).
+Other modules add or change elements in their file `config/combined-module-central-ui.php`:
+
+```php
+return [
+    'desktop_toolbar' => [
+        // view gets $_config and $collectionName, 'css_group' is the css of its wrapper
+        'my_item' => ['view' => 'my-module::toolbar.my-item', 'position' => 6000, 'css_group' => ''],
+        // remove an element of this module
+        'server_power' => ['view' => null],
+    ],
+];
+```
+
+Rows per page and the other filters are only shown in the list layout.
+
+## Server power
+
+The button "Server" in the toolbar shuts down the whole server, including Proxtop itself. Only for `admin`, always
+confirmed by a message box of the driver (`config/message-boxes.php`). The confirmation warns if a backup runs or
+starts within `central-ui.power.backup_warning_seconds` (15 minutes); the request is checked again on the server.
+
+How the server is shut down is a driver (config `central-ui.power.driver`, env `SERVER_POWER_DRIVER`):
+
+| Driver              | What happens                                                                                                                          | Needs                                                                         |
+|---------------------|---------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------|
+| `proxmox` (default) | Proxmox API `POST nodes/{node}/status command=shutdown` for every online node (Proxmox stops the VMs first), at once, no grace period | `Sys.PowerMgmt` for the API token; optional `SERVER_POWER_NODES` (comma list) |
+| `http`              | a power service of the host decides, e.g. `pve-power` with grace period and Telegram buttons                                          | `SERVER_POWER_URL`, `SERVER_POWER_TOKEN`                                      |
+| `none`              | no button                                                                                                                             |                                                                               |
+
+Without `SERVER_POWER_DRIVER`: `http` if `SERVER_POWER_URL` is set, otherwise `proxmox`. Own drivers implement
+`Services\Power\ServerPowerDriver` and are added to `central-ui.power.drivers` (plus their message boxes).
+
+```yaml
+# project/config/secrets.yaml or the network of the instance, driver http
+env:
+  SERVER_POWER_URL: "https://power-api.example.internal/shutdown"
+  SERVER_POWER_TOKEN: "<same as POWER_API_TOKEN on the host>"
+  # SERVER_POWER_VERIFY_TLS: false   # only for https with a self signed certificate
+```
+
+Contract of `http` (see `HttpShutdown`): `POST <url>`, `Authorization: Bearer <token>`, JSON
+`{"action": "shutdown", "source": "proxtop", "requested_by": "<name>", "force": false}`, answer
+`{"ok": true, "shutdown_at": <UNIX time>, "message": "..."}`.
+
+## Proxmox API token
+
+The API token of a server (Admin > Proxmox > Servers) needs these privileges (with privilege separation: on the
+token itself, otherwise on its user):
+
+| Privilege                                                   | Path     | For                                                  |
+|-------------------------------------------------------------|----------|------------------------------------------------------|
+| `VM.Audit`                                                  | `/`      | `cluster/resources` (guests), `rrddata` (statistics) |
+| `VM.PowerMgmt`                                              | `/`      | start and shutdown of the VMs                        |
+| `VM.GuestAgent.Unrestricted` (PVE 9) / `VM.Monitor` (PVE 8) | `/`      | commands in a VM by the guest agent (`agent/exec`)   |
+| `Sys.Audit`                                                 | `/`      | nodes and storages, backup jobs, tasks and task logs |
+| `Sys.PowerMgmt` (only power driver `proxmox`)               | `/nodes` | shutdown of the whole server (button "Server")       |
+
+With the power driver `http` the shutdown of the server does not use this token (no `Sys.PowerMgmt` needed).
+`Sys.Audit` is required for the backups: without it `cluster/backup` answers 403 and the backup tasks of the
+scheduler (`root@pam`) are not visible.
+
+## Time zones
+
+Internally everything is UTC (`app.timezone`, database, calculations). Local are only the times people see and
+type in (Setting of the WebsiteBase module):
+
+- `APP_DISPLAY_TIMEZONE` (config `website-base.timezone`, e.g. `Europe/Berlin`): time zone of the installation.
+  The schedules of the VM groups (cron expression, start and end date) are local times of it, including daylight
+  saving time ("0 8 * * *" opens at 08:00 local time all year). Empty: UTC (former behavior).
+- User setting `timezone` (profile, WebsiteBase deployment `0018`): times shown to this user (backups, server
+  power, online since). Empty: the installation.
+
+In code: `app('website_base_settings')->toDisplayTime($timestamp)->format('H:i')` for display,
+`installationTimezone()` for shared local times, `ProxtopServerVm::scheduleTiming()` for a schedule.
 
 ## License
 
