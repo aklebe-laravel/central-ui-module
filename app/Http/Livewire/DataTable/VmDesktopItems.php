@@ -356,7 +356,8 @@ class VmDesktopItems extends ProxtopObserveServerItem
         // search grows, its settings menu (new entry, export, ...) only in the list layout
         $this->setDefaultFilter('search.view',
             $isList ? 'data-table::livewire.js-dt.filters.default-elements.search-and-settings' : 'data-table::livewire.js-dt.filters.default-elements.text');
-        $this->setDefaultFilter('search.css_group', 'flex-1 min-w-48 max-w-md');
+        // min-w-0 on mobile: the search shrinks, so backups and server power stay in the same row
+        $this->setDefaultFilter('search.css_group', 'flex-1 min-w-0 sm:min-w-48 max-w-md');
 
         // the other filters (rows per page, ...) only in the list layout, the toolbar elements always
         $toolbarElements = array_keys(self::toolbarElements());
@@ -364,7 +365,8 @@ class VmDesktopItems extends ProxtopObserveServerItem
             if (in_array($name, self::CARDS_HEADER_ELEMENTS, true) || in_array($name, $toolbarElements, true)) {
                 continue;
             }
-            $this->setDefaultFilter($name.'.css_group', $isList ? 'w-28' : 'hidden');
+            // rows per page etc.: list layout only, not on mobile (room for the toolbar elements)
+            $this->setDefaultFilter($name.'.css_group', $isList ? 'hidden sm:block w-28' : 'hidden');
         }
 
         switch ($this->layout) {

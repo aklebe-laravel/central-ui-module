@@ -13,6 +13,7 @@ use Modules\CentralUi\app\Models\ProxtopServerAction;
 use Modules\CentralUi\app\Services\Backup\ProxmoxBackupService;
 use Modules\CentralUi\app\Services\ProxmoxService;
 use Modules\CentralUi\app\Services\SafeBroadcast;
+use Modules\CentralUi\app\Services\ServerPowerService;
 use Modules\SystemBase\app\Providers\Base\ScheduleBaseServiceProvider;
 
 class ScheduleServiceProvider extends ScheduleBaseServiceProvider
@@ -82,6 +83,16 @@ class ScheduleServiceProvider extends ScheduleBaseServiceProvider
                 && Cache::add('central-ui.scheduler.backups', $currentTime, $backupInterval)
             ) {
                 RefreshProxmoxDataJob::dispatch(RefreshProxmoxDataJob::PartBackups);
+            }
+
+            // 3c. Planned shutdown of the server (countdown), only if the power driver has one (http).
+            // Faster while a shutdown is planned; both are cheap cache reads, no request in this tick.
+            $power = app(ServerPowerService::class);
+            if ($power->supportsSchedule()) {
+                $powerInterval = $power->isShutdownPlanned() ? (int) config('central-ui.power.status_interval_planned', 10) : (int) config('central-ui.power.status_interval', 30);
+                if ($powerInterval > 0 && Cache::add('central-ui.scheduler.power', $currentTime, $powerInterval)) {
+                    RefreshProxmoxDataJob::dispatch(RefreshProxmoxDataJob::PartPower);
+                }
             }
 
             // 4. Due database actions (start / shutdown / expiring pending locks).

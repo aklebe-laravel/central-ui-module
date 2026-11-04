@@ -52,6 +52,11 @@ return [
         'token'                  => env('SERVER_POWER_TOKEN'),
         'verify_tls'             => (bool) env('SERVER_POWER_VERIFY_TLS', true),
         'timeout'                => 10,
+        // driver http: seconds between two status requests (countdown), faster while a shutdown is planned
+        'status_interval'         => (int) env('SERVER_POWER_STATUS_INTERVAL', 30),
+        'status_interval_planned' => 10,
+        // countdown: extensions offered to every user (minutes), stopping is for admins only
+        'extend_minutes'          => [30, 120],
         // the confirmation warns if a backup runs or starts within this many seconds
         'backup_warning_seconds' => 900,
     ],

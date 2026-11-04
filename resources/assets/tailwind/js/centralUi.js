@@ -231,6 +231,39 @@ export class CentralUi {
             }));
 
             /**
+             * Countdown of a planned server shutdown (livewire/server-power.blade.php): "12:34" or "1:02:03",
+             * every second in the browser, no server request. At 0 the card asks the server once for the real state.
+             */
+            window.Alpine.data('powerCountdown', (timestamp) => ({
+                text: '',
+                timer: null,
+                refreshed: false,
+
+                init() {
+                    const pad = (n) => String(n).padStart(2, '0');
+                    const update = () => {
+                        const left = Math.max(0, Math.round(timestamp - Date.now() / 1000));
+                        const h = Math.floor(left / 3600);
+                        const m = Math.floor((left % 3600) / 60);
+                        const s = left % 60;
+                        this.text = h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+                        if (left === 0 && !this.refreshed) {
+                            this.refreshed = true;
+                            this.$wire?.$refresh();
+                        }
+                    };
+                    update();
+                    this.timer = setInterval(update, 1000);
+                },
+
+                destroy() {
+                    if (this.timer) {
+                        clearInterval(this.timer);
+                    }
+                },
+            }));
+
+            /**
              * Relative time to a UNIX timestamp like "in 3 hours", updated every 30 seconds
              * in the browser (no server request). Language of the page (<html lang>).
              */

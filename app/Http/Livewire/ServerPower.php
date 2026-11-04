@@ -10,7 +10,9 @@ use Livewire\Attributes\On;
 use Modules\Acl\app\Models\AclResource;
 use Modules\CentralUi\app\Http\Livewire\DataTable\VmDesktopItems;
 use Modules\CentralUi\app\Models\ProxtopServer;
+use Modules\CentralUi\app\Events\ServerPowerUpdated;
 use Modules\CentralUi\app\Services\Backup\ProxmoxBackupService;
+use Modules\CentralUi\app\Services\SafeBroadcast;
 use Modules\CentralUi\app\Services\ServerPowerService;
 use Modules\SystemBase\app\Http\Livewire\BaseComponent;
 
@@ -21,6 +23,10 @@ use Modules\SystemBase\app\Http\Livewire\BaseComponent;
  * - always confirmed by the message box of the driver (config/message-boxes.php 'central-ui-server.desktop.*'),
  *   with a backup warning while a backup runs or a job starts within 'central-ui.power.backup_warning_seconds'
  * - the shutdown itself is done by the driver: Proxmox API (default) or a power service of the host
+ *
+ * Countdown (only drivers with grace period, Power\ServerPowerSchedule): while a shutdown is planned, every user
+ * sees the countdown instead of the button. Everyone can extend it ('central-ui.power.extend_minutes'),
+ * only admins can stop it. The planned time comes from the cache (ServerPowerService::cachedSchedule()).
  */
 class ServerPower extends BaseComponent
 {
@@ -41,9 +47,85 @@ class ServerPower extends BaseComponent
      * @return void
      */
     #[On('echo:proxmox-backup-updates,.Modules\CentralUi\app\Events\ProxmoxApiBackupDataUpdated')]
+    #[On('echo:server-power-updates,.Modules\CentralUi\app\Events\ServerPowerUpdated')]
     #[On('vm-desktop:poll')]
     public function refreshState(): void
     {
+    }
+
+    /**
+     * Extends the planned shutdown. Every logged in user (like the Telegram buttons).
+     *
+     * @param  int  $minutes  one of 'central-ui.power.extend_minutes'
+     *
+     * @return void
+     */
+    public function extendShutdown(int $minutes): void
+    {
+        $user = app('website_base_settings')->currentUser();
+        $driver = app(ServerPowerService::class)->scheduleDriver();
+        if (!$user || !$driver || !in_array($minutes, (array) config('central-ui.power.extend_minutes', [30, 120]), true)) {
+            $this->notify('error', __('Permission denied'));
+
+            return;
+        }
+
+        $result = $driver->extendShutdown($minutes, self::userName($user));
+        $this->afterScheduleAction($result, fn() => __('The server shuts down at :time.', [
+            'time' => app('website_base_settings')
+                ->toDisplayTime((int) $result['shutdown_at'])
+                ->format('H:i'),
+        ]));
+    }
+
+    /**
+     * Stops the planned shutdown. Admins only.
+     *
+     * @return void
+     */
+    public function cancelShutdown(): void
+    {
+        $user = app('website_base_settings')->currentUser();
+        $driver = app(ServerPowerService::class)->scheduleDriver();
+        if (!$user || !$driver || !$user->hasAclResource([AclResource::RES_ADMIN])) {
+            $this->notify('error', __('Permission denied'));
+
+            return;
+        }
+
+        $result = $driver->cancelShutdown(self::userName($user));
+        $this->afterScheduleAction($result, fn() => __('Shutdown of the server stopped.'));
+    }
+
+    /**
+     * Result of extend/cancel: message, remember the new time at once and tell all desktops.
+     *
+     * @param  array{ok: bool, shutdown_at: ?int, message: string}  $result
+     * @param  callable                                             $successMessage
+     *
+     * @return void
+     */
+    protected function afterScheduleAction(array $result, callable $successMessage): void
+    {
+        if (!$result['ok']) {
+            $this->notify('error', $result['message']);
+
+            return;
+        }
+
+        app(ServerPowerService::class)->rememberSchedule($result['shutdown_at']);
+        SafeBroadcast::send(new ServerPowerUpdated());
+        $this->notify('success', $successMessage());
+    }
+
+    /**
+     * @param  mixed  $user
+     *
+     * @return string  name shown in the notifications of the host
+     */
+    protected static function userName(mixed $user): string
+    {
+        return (string) ($user->name ?? $user->email ?? 'unknown');
     }
 
     /**
@@ -76,12 +158,18 @@ class ServerPower extends BaseComponent
         }
 
         $user = app('website_base_settings')->currentUser();
-        $result = app(ServerPowerService::class)->requestShutdown((string) ($user->name ?? $user->email ?? 'unknown'), $force);
+        $result = app(ServerPowerService::class)->requestShutdown(self::userName($user), $force);
 
         if (!$result['ok']) {
             $this->notify('error', $result['message']);
 
             return;
+        }
+
+        // countdown at once (drivers with grace period), not only with the next status request
+        if ($result['shutdown_at'] && app(ServerPowerService::class)->supportsSchedule()) {
+            app(ServerPowerService::class)->rememberSchedule($result['shutdown_at']);
+            SafeBroadcast::send(new ServerPowerUpdated());
         }
 
         $this->notify('success',
@@ -120,11 +208,25 @@ class ServerPower extends BaseComponent
         $risk = $canUse ? $this->shutdownRisk() : ['running' => false, 'next_run' => null];
         $backupRisk = $risk['running'] || $risk['next_run'] !== null;
 
+        $power = app(ServerPowerService::class);
+        $user = app('website_base_settings')->currentUser();
+        // planned shutdown (countdown): for every logged in user, until shortly after the time (the server goes down)
+        $shutdownAt = ($user && $power->supportsSchedule()) ? $power->cachedSchedule()['shutdown_at'] : null;
+        if ($shutdownAt !== null && $shutdownAt < time() - 120) {
+            $shutdownAt = null;
+        }
+
         return view('central-ui::livewire.server-power', [
-            'canUse' => $canUse,
-            'risk' => $risk,
-            'backupRisk' => $backupRisk,
-            'messageBox' => $canUse ? app(ServerPowerService::class)->messageBox($backupRisk) : '',
+            'canUse'        => $canUse,
+            'canCancel'     => $user && $user->hasAclResource([AclResource::RES_ADMIN]),
+            'risk'          => $risk,
+            'backupRisk'    => $backupRisk,
+            'messageBox'    => $canUse ? $power->messageBox($backupRisk) : '',
+            'shutdownAt'    => $shutdownAt,
+            'shutdownTime'  => $shutdownAt ? app('website_base_settings')
+                ->toDisplayTime($shutdownAt)
+                ->format('H:i') : '',
+            'extendMinutes' => (array) config('central-ui.power.extend_minutes', [30, 120]),
         ]);
     }
 

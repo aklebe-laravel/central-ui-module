@@ -287,9 +287,26 @@ env:
   # SERVER_POWER_VERIFY_TLS: false   # only for https with a self signed certificate
 ```
 
-Contract of `http` (see `HttpShutdown`): `POST <url>`, `Authorization: Bearer <token>`, JSON
-`{"action": "shutdown", "source": "proxtop", "requested_by": "<name>", "force": false}`, answer
-`{"ok": true, "shutdown_at": <UNIX time>, "message": "..."}`.
+Contract of `http` (see `HttpShutdown`), always `Authorization: Bearer <token>`. `SERVER_POWER_URL` ends with
+`/shutdown`, the other actions are its siblings:
+
+| Request             | Body                                                                                    | For                       |
+|---------------------|-----------------------------------------------------------------------------------------|---------------------------|
+| `POST .../shutdown` | `{"action": "shutdown", "source": "proxtop", "requested_by": "<name>", "force": false}` | start the grace period    |
+| `GET .../status`    |                                                                                         | countdown (`shutdown_at`) |
+| `POST .../extend`   | `{"minutes": 30, "requested_by": "<name>"}`                                             | extend (every user)       |
+| `POST .../cancel`   | `{"requested_by": "<name>"}`                                                            | stop (admins only)        |
+
+Answer: `{"ok": true, "shutdown_at": <UNIX time or null>, "message": "..."}`.
+
+### Countdown
+
+Drivers with grace period implement `Services\Power\ServerPowerSchedule` (`http` does, `proxmox` has no grace
+period). The queue job (`RefreshProxmoxDataJob`, part `power`) asks for the planned shutdown every
+`SERVER_POWER_STATUS_INTERVAL` seconds (30), every 10 seconds while one is planned, caches it and broadcasts
+`ServerPowerUpdated` (channel `server-power-updates`) on changes. While a shutdown is planned **every user** sees the
+countdown instead of the button (the browser counts down itself). Everyone can extend it (`central-ui.power.extend_minutes`, 30 and 120), only admins can stop it. A shutdown planned elsewhere (power
+button, Telegram, `shutdown +15` via SSH) shows up as well, because the host reports its systemd schedule.
 
 ## Proxmox API token
 

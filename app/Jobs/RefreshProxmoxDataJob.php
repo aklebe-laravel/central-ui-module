@@ -13,10 +13,12 @@ use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Queue\SerializesModels;
 use Modules\CentralUi\app\Events\ProxmoxApiBackupDataUpdated;
 use Modules\CentralUi\app\Events\ProxmoxApiResourceDataUpdated;
+use Modules\CentralUi\app\Events\ServerPowerUpdated;
 use Modules\CentralUi\app\Events\ProxmoxApiRrdDataUpdated;
 use Modules\CentralUi\app\Services\Backup\ProxmoxBackupService;
 use Modules\CentralUi\app\Services\ProxmoxService;
 use Modules\CentralUi\app\Services\SafeBroadcast;
+use Modules\CentralUi\app\Services\ServerPowerService;
 
 /**
  * Fetches data from the Proxmox API and rebuilds the payload cache.
@@ -30,6 +32,8 @@ use Modules\CentralUi\app\Services\SafeBroadcast;
  *   - PartRrd:       RRD statistics per running VM for one timeframe (ProxmoxService::receiveRrdData),
  *                    one job per key of ProxmoxService::RrdTimeframes
  *   - PartBackups:   backup jobs and running backups (ProxmoxBackupService::receiveAndCache)
+ *   - PartPower:     planned shutdown of the server (ServerPowerService::refreshSchedule), one short request
+ *                    to the power service of the host, not serialized with the others (the countdown must not wait)
  */
 class RefreshProxmoxDataJob implements ShouldQueue, ShouldBeUnique
 {
@@ -38,6 +42,7 @@ class RefreshProxmoxDataJob implements ShouldQueue, ShouldBeUnique
     public const string PartResources = 'resources';
     public const string PartRrd = 'rrd';
     public const string PartBackups = 'backups';
+    public const string PartPower = 'power';
 
     /**
      * Max runtime of one run (seconds).
@@ -51,7 +56,7 @@ class RefreshProxmoxDataJob implements ShouldQueue, ShouldBeUnique
     public int $uniqueFor = 120;
 
     /**
-     * @param  string  $part       self::PartResources, self::PartRrd or self::PartBackups
+     * @param  string  $part       self::PartResources, self::PartRrd, self::PartBackups or self::PartPower
      * @param  string  $timeframe  PartRrd only: key of ProxmoxService::RrdTimeframes
      */
     public function __construct(protected string $part, protected string $timeframe = 'hour')
@@ -76,6 +81,11 @@ class RefreshProxmoxDataJob implements ShouldQueue, ShouldBeUnique
      */
     public function middleware(): array
     {
+        // not the Proxmox API, one short request: runs beside the others
+        if ($this->part === self::PartPower) {
+            return [];
+        }
+
         return [
             (new WithoutOverlapping('proxmox-data-refresh'))->releaseAfter(5)
                 ->expireAfter(180),
@@ -104,6 +114,14 @@ class RefreshProxmoxDataJob implements ShouldQueue, ShouldBeUnique
         if ($this->part === self::PartRrd) {
             $proxmox->receiveRrdData($this->timeframe);
             SafeBroadcast::send(new ProxmoxApiRrdDataUpdated());
+
+            return;
+        }
+
+        if ($this->part === self::PartPower) {
+            if (app(ServerPowerService::class)->refreshSchedule()) {
+                SafeBroadcast::send(new ServerPowerUpdated());
+            }
 
             return;
         }
